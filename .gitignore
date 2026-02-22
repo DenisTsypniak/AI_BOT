@@ -4,3 +4,5 @@
 .env
 *.db
 Discord Bot/data/
+.vscode/
+Discord Bot/.vscode/
