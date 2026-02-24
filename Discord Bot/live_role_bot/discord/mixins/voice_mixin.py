@@ -1,0 +1,318 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import time
+from typing import Any
+
+import discord
+
+try:
+    import audioop
+except ModuleNotFoundError:
+    import audioop_lts as audioop  # type: ignore[import-not-found]
+
+from ..common import PendingVoiceTurn, VoiceTurnBuffer, collapse_spaces
+from ..voice_integration import VOICE_RECV_AVAILABLE, VoiceInputSink, voice_recv
+
+logger = logging.getLogger("live_role_bot")
+
+
+class VoiceMixin:
+    async def _connect_or_move_voice_client(
+        self,
+        guild: discord.Guild,
+        target: discord.abc.Connectable,
+    ) -> discord.VoiceClient | None:
+        attempts = 3
+        last_error: Exception | None = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                voice_client = guild.voice_client
+                if voice_client is None:
+                    connected = await target.connect(
+                        cls=voice_recv.VoiceRecvClient,
+                        timeout=18.0,
+                        reconnect=True,
+                    )
+                    if isinstance(connected, discord.VoiceClient):
+                        return connected
+                    return None
+
+                if not isinstance(voice_client, discord.VoiceClient):
+                    with contextlib.suppress(Exception):
+                        await voice_client.disconnect(force=True)
+                    voice_client = None
+                    continue
+
+                if voice_client.channel != target:
+                    await asyncio.wait_for(voice_client.move_to(target), timeout=12.0)
+                return voice_client
+            except asyncio.CancelledError:
+                raise
+            except (asyncio.TimeoutError, TimeoutError) as exc:
+                last_error = exc
+                logger.warning(
+                    "Voice connect attempt %s/%s timed out for guild=%s channel=%s",
+                    attempt,
+                    attempts,
+                    guild.id,
+                    getattr(target, "id", "unknown"),
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Voice connect attempt %s/%s failed for guild=%s channel=%s: %s",
+                    attempt,
+                    attempts,
+                    guild.id,
+                    getattr(target, "id", "unknown"),
+                    exc,
+                )
+
+            current = guild.voice_client
+            if current is not None:
+                with contextlib.suppress(Exception):
+                    if VOICE_RECV_AVAILABLE and voice_recv is not None and isinstance(current, voice_recv.VoiceRecvClient):
+                        if current.is_listening():
+                            current.stop_listening()
+                with contextlib.suppress(Exception):
+                    await current.disconnect(force=True)
+            await asyncio.sleep(0.35 * attempt)
+
+        if last_error is not None:
+            logger.error(
+                "Voice connect failed after retries for guild=%s channel=%s: %s",
+                guild.id,
+                getattr(target, "id", "unknown"),
+                last_error,
+            )
+        return None
+
+    async def _ensure_voice_capture(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        text_channel_id: int,
+    ) -> bool:
+        if not self.settings.voice_enabled or not self.settings.voice_auto_capture:
+            return False
+        if not VOICE_RECV_AVAILABLE or voice_recv is None:
+            return False
+        if not member.voice or not member.voice.channel:
+            return False
+
+        target = member.voice.channel
+        voice_client = await self._connect_or_move_voice_client(guild, target)
+        if voice_client is None:
+            return False
+
+        if not isinstance(voice_client, voice_recv.VoiceRecvClient):
+            return False
+
+        if voice_client.is_listening():
+            voice_client.stop_listening()
+
+        self.voice_text_channels[guild.id] = text_channel_id
+
+        if self.settings.gemini_native_audio_enabled:
+            if self.native_audio is None:
+                logger.error("Native Audio is enabled but manager is unavailable")
+                return False
+            try:
+                prompt = await self._build_native_audio_system_prompt(guild, target)
+                await self.native_audio.start_session(
+                    guild_id=guild.id,
+                    voice_channel_id=target.id,
+                    text_channel_id=text_channel_id,
+                    bot_user_id=self.user.id if self.user else 0,
+                    system_prompt=prompt,
+                    preferred_language=self.settings.preferred_response_language,
+                    send_transcripts_to_text=self.settings.voice_send_transcripts_to_text,
+                )
+                logger.info("Gemini Native Audio session started for guild=%s channel=%s", guild.id, target.id)
+            except Exception as exc:
+                logger.error("Native Audio start failed for guild=%s: %s", guild.id, exc)
+                channel = self.get_channel(text_channel_id)
+                if isinstance(
+                    channel,
+                    (
+                        discord.TextChannel,
+                        discord.Thread,
+                        discord.DMChannel,
+                        discord.GroupChannel,
+                        discord.PartialMessageable,
+                    ),
+                ):
+                    with contextlib.suppress(Exception):
+                        await channel.send(
+                            "Native Audio session failed to start. "
+                            "Use `GEMINI_LIVE_MODEL=models/gemini-2.5-flash-native-audio-latest`."
+                        )
+                return False
+
+        sink: Any = VoiceInputSink(self, guild.id, self.user.id if self.user else 0)
+
+        def _after(error: Exception | None) -> None:
+            if error:
+                logger.error("Voice listening stopped with error: %s", error)
+
+        voice_client.listen(sink, after=_after)
+        logger.info("Voice capture active in guild=%s channel=%s", guild.id, target.id)
+        return True
+
+    def push_voice_pcm(self, guild_id: int, user_id: int, user_label: str, pcm_48k_stereo: bytes) -> None:
+        key = (guild_id, user_id)
+        if key not in self._seen_voice_pcm_users:
+            self._seen_voice_pcm_users.add(key)
+            logger.info("[voice.input] first PCM packet from user=%s guild=%s", user_id, guild_id)
+
+        if self.settings.gemini_native_audio_enabled:
+            if self.native_audio is not None and self.native_audio.has_session(guild_id):
+                self.native_audio.push_pcm(guild_id, user_id, user_label, pcm_48k_stereo)
+            return
+
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(self._ingest_voice_pcm, guild_id, user_id, user_label, pcm_48k_stereo)
+
+    def _ingest_voice_pcm(self, guild_id: int, user_id: int, user_label: str, pcm_48k_stereo: bytes) -> None:
+        if not pcm_48k_stereo:
+            return
+
+        now = time.monotonic()
+        key = (guild_id, user_id)
+        state = self.voice_buffers.setdefault(key, VoiceTurnBuffer())
+
+        try:
+            rms = int(audioop.rms(pcm_48k_stereo, 2))
+        except Exception:
+            rms = 0
+
+        silence_threshold = max(20, self.settings.voice_silence_rms)
+        if rms >= silence_threshold:
+            if state.started_at <= 0:
+                state.started_at = now
+            state.last_voice_at = now
+            state.user_label = user_label or state.user_label
+            state.data.extend(pcm_48k_stereo)
+
+            duration_sec = len(state.data) / (48000 * 4)
+            if duration_sec >= self.settings.voice_max_turn_seconds:
+                self._finalize_voice_turn(key)
+            return
+
+        if state.started_at > 0 and now - state.last_voice_at >= (self.settings.voice_silence_ms / 1000.0):
+            self._finalize_voice_turn(key)
+
+    def _finalize_voice_turn(self, key: tuple[int, int]) -> None:
+        state = self.voice_buffers.pop(key, None)
+        if state is None or not state.data:
+            return
+
+        pcm = bytes(state.data)
+        duration_ms = int((len(pcm) / (48000 * 4)) * 1000)
+        if duration_ms < self.settings.voice_min_turn_ms:
+            return
+
+        guild_id, user_id = key
+        channel_id = self.voice_text_channels.get(guild_id)
+        if channel_id is None:
+            return
+
+        item = PendingVoiceTurn(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            user_id=user_id,
+            user_label=state.user_label,
+            pcm_48k_stereo=pcm,
+        )
+
+        if self.voice_turn_queue.full():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self.voice_turn_queue.get_nowait()
+                self.voice_turn_queue.task_done()
+
+        with contextlib.suppress(asyncio.QueueFull):
+            self.voice_turn_queue.put_nowait(item)
+
+    async def _voice_flush_loop(self) -> None:
+        while True:
+            await asyncio.sleep(0.18)
+            if not self.voice_buffers:
+                continue
+            now = time.monotonic()
+            silence_seconds = self.settings.voice_silence_ms / 1000.0
+            stale: list[tuple[int, int]] = []
+            for key, state in list(self.voice_buffers.items()):
+                if state.started_at <= 0:
+                    continue
+                if now - state.last_voice_at >= silence_seconds:
+                    stale.append(key)
+            for key in stale:
+                self._finalize_voice_turn(key)
+
+    async def _voice_worker(self) -> None:
+        while True:
+            item = await self.voice_turn_queue.get()
+            try:
+                result = await self.local_stt.transcribe(item.pcm_48k_stereo)
+                transcript = collapse_spaces(result.text)
+                await self.memory.save_stt_turn(
+                    guild_id=str(item.guild_id),
+                    channel_id=str(item.channel_id),
+                    user_id=str(item.user_id),
+                    duration_ms=result.duration_ms,
+                    rms=result.rms,
+                    transcript=transcript or None,
+                    confidence=result.confidence,
+                    model_name=result.model_name,
+                    status=result.status,
+                    message_id=None,
+                )
+
+                if not transcript or result.confidence < self.settings.transcription_min_confidence:
+                    continue
+
+                guild = self.get_guild(item.guild_id)
+                if guild is not None:
+                    member = guild.get_member(item.user_id)
+                    if member is not None:
+                        with contextlib.suppress(Exception):
+                            item.user_label = await self._sync_member_identity(item.guild_id, member)
+
+                reply = await self._run_dialogue_turn(
+                    guild_id=item.guild_id,
+                    channel_id=item.channel_id,
+                    user_id=item.user_id,
+                    user_label=item.user_label,
+                    user_text=transcript,
+                    modality="voice",
+                    source="local_stt",
+                    quality=result.confidence,
+                )
+
+                channel_obj = self.get_channel(item.channel_id)
+                messageable: discord.abc.Messageable | None = None
+                if isinstance(
+                    channel_obj,
+                    (
+                        discord.TextChannel,
+                        discord.Thread,
+                        discord.DMChannel,
+                        discord.GroupChannel,
+                        discord.PartialMessageable,
+                    ),
+                ):
+                    messageable = channel_obj
+                if messageable is not None:
+                    await self._send_chunks(messageable, reply)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("Voice worker error: %s", exc)
+            finally:
+                self.voice_turn_queue.task_done()
