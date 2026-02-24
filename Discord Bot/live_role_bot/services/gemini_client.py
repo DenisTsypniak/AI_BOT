@@ -8,6 +8,8 @@ from typing import Any, Dict, List
 
 import aiohttp
 
+from ..prompts.memory import build_json_only_system_prompt
+
 
 class GeminiClient:
     def __init__(
@@ -157,10 +159,7 @@ class GeminiClient:
         strict_messages.append(
             {
                 "role": "system",
-                "content": (
-                    "Return only valid JSON object with no markdown and no additional commentary. "
-                    f"Schema hint: {schema_hint}"
-                ),
+                "content": build_json_only_system_prompt(schema_hint),
             }
         )
         raw = await self.chat(

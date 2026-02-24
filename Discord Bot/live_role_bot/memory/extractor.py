@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from typing import List
 
 from ..services.gemini_client import GeminiClient
+from ..prompts.memory import (
+    FACT_EXTRACTOR_SCHEMA_HINT,
+    FACT_EXTRACTOR_SYSTEM_PROMPT,
+    build_fact_extractor_user_prompt,
+)
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -63,31 +68,23 @@ class MemoryExtractor:
         if len(text) < 4:
             return None
 
-        schema_hint = (
-            '{"facts":[{"key":"string","value":"string","type":"identity|preference|goal|context|relationship|constraint",'
-            '"confidence":0.0,"importance":0.0}]}'
-        )
-
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "Extract only durable user facts that can personalize future dialogue. "
-                    "Ignore temporary filler and repeated greetings. "
-                    "If no durable facts exist, return facts: []."
-                ),
+                "content": FACT_EXTRACTOR_SYSTEM_PROMPT,
             },
             {
                 "role": "user",
-                "content": (
-                    f"Preferred language: {preferred_language}\n"
-                    f"User utterance: {text}\n"
-                    "Return JSON."
-                ),
+                "content": build_fact_extractor_user_prompt(preferred_language, text),
             },
         ]
 
-        payload = await self.llm.json_chat(messages, schema_hint=schema_hint, temperature=0.1, max_output_tokens=800)
+        payload = await self.llm.json_chat(
+            messages,
+            schema_hint=FACT_EXTRACTOR_SCHEMA_HINT,
+            temperature=0.1,
+            max_output_tokens=800,
+        )
         if payload is None:
             return None
 

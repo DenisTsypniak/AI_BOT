@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from ..common import PendingProfileUpdate, PendingSummaryUpdate, as_int, collapse_spaces, truncate
+from ...prompts.memory import build_summary_update_system_prompt, build_summary_update_user_prompt
 
 logger = logging.getLogger("live_role_bot")
 
@@ -149,19 +150,11 @@ class WorkersMixin:
         prompt_messages: list[dict[str, Any]] = [
             {
                 "role": "system",
-                "content": (
-                    "Update rolling memory summary for one user's ongoing dialogue with assistant. "
-                    "Keep durable topics, preferences, goals, unresolved items, emotional context. "
-                    f"Output plain text, max {max_chars} chars."
-                ),
+                "content": build_summary_update_system_prompt(max_chars),
             },
             {
                 "role": "user",
-                "content": (
-                    f"Previous summary:\n{previous_summary or '(none)'}\n\n"
-                    f"Recent dialogue:\n{chr(10).join(dialogue_lines)}\n\n"
-                    "Return updated summary."
-                ),
+                "content": build_summary_update_user_prompt(previous_summary, dialogue_lines),
             },
         ]
 

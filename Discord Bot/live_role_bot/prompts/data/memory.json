@@ -1,0 +1,19 @@
+{
+  "fact_extractor_schema_hint_object": {
+    "facts": [
+      {
+        "key": "string",
+        "value": "string",
+        "type": "identity|preference|goal|context|relationship|constraint",
+        "confidence": 0.0,
+        "importance": 0.0
+      }
+    ]
+  },
+  "fact_extractor_system_prompt": "Extract only durable user facts that can personalize future dialogue. Ignore temporary filler and repeated greetings. If no durable facts exist, return facts: [].",
+  "fact_extractor_user_prompt_template": "Preferred language: {preferred_language}\nUser utterance: {text}\nReturn JSON.",
+  "json_only_system_prompt_template": "Return only valid JSON object with no markdown and no additional commentary. Schema hint: {schema_hint}",
+  "summary_update_system_prompt_template": "Update rolling memory summary for one user's ongoing dialogue with assistant. Keep durable topics, preferences, goals, unresolved items, emotional context. Output plain text, max {max_chars} chars.",
+  "summary_update_user_prompt_template": "Previous summary:\n{previous_summary}\n\nRecent dialogue:\n{dialogue_lines}\n\nReturn updated summary."
+}
+

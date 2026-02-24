@@ -163,7 +163,7 @@ class Settings:
             gemini_model=_env_str("GEMINI_MODEL", "gemini-2.5-flash"),
             gemini_timeout_seconds=_env_int("GEMINI_TIMEOUT_SECONDS", 90),
             gemini_temperature=_env_float("GEMINI_TEMPERATURE", 0.6),
-            gemini_max_output_tokens=_env_int("GEMINI_MAX_OUTPUT_TOKENS", 1024),
+            gemini_max_output_tokens=_env_int("GEMINI_MAX_OUTPUT_TOKENS", 0),
             gemini_native_audio_enabled=_env_bool("GEMINI_NATIVE_AUDIO_ENABLED", True),
             gemini_live_model=_env_str(
                 "GEMINI_LIVE_MODEL",
@@ -176,7 +176,7 @@ class Settings:
             gemini_live_vad_silence_ms=_env_int("GEMINI_LIVE_VAD_SILENCE_MS", 420),
             sqlite_path=Path(_env_str("SQLITE_PATH", "./data/live_dialogue.db")).expanduser(),
             max_recent_messages=_env_int("MAX_RECENT_MESSAGES", 18, aliases=("MAX_HISTORY_MESSAGES",)),
-            max_response_chars=_env_int("MAX_RESPONSE_CHARS", 3200),
+            max_response_chars=_env_int("MAX_RESPONSE_CHARS", 0),
             default_role_id=_env_str("DEFAULT_ROLE_ID", "live-role-default"),
             role_name=_env_str("ROLE_NAME", "Companion Debater"),
             role_goal=_env_str(
@@ -263,8 +263,10 @@ class Settings:
 
         if self.max_recent_messages < 4:
             raise ValueError("MAX_RECENT_MESSAGES must be >= 4")
-        if self.max_response_chars < 300:
-            raise ValueError("MAX_RESPONSE_CHARS must be >= 300")
+        if self.max_response_chars < 0:
+            raise ValueError("MAX_RESPONSE_CHARS must be >= 0 (0 disables explicit cap)")
+        if self.max_response_chars and self.max_response_chars < 300:
+            raise ValueError("MAX_RESPONSE_CHARS must be 0 or >= 300")
 
         if self.memory_fact_top_k < 1:
             raise ValueError("MEMORY_FACT_TOP_K must be >= 1")

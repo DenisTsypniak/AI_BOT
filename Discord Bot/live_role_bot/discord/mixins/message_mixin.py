@@ -283,7 +283,7 @@ class MessageMixin:
                 role_id=role_id,
             )
 
-            clean_user_text = collapse_spaces(user_text)[:2000]
+            clean_user_text = collapse_spaces(user_text)
             user_message_id = await self.memory.save_message(
                 session_id=session_id,
                 guild_id=guild_key,
@@ -292,7 +292,7 @@ class MessageMixin:
                 author_label=user_label,
                 role="user",
                 modality=modality,
-                content_raw=user_text[:3500],
+                content_raw=user_text,
                 content_clean=clean_user_text,
                 source=source,
                 quality=quality,
@@ -346,7 +346,7 @@ class MessageMixin:
             if reply is None:
                 reply = await self.llm.chat(llm_messages)
 
-            if len(reply) > self.settings.max_response_chars:
+            if self.settings.max_response_chars > 0 and len(reply) > self.settings.max_response_chars:
                 reply = truncate(reply, self.settings.max_response_chars)
 
             bot_user_id = str(self.user.id if self.user else 0)

@@ -6,6 +6,18 @@ from typing import Any
 import discord
 
 from ..common import as_float, as_int, tokenize
+from ...prompts.dialogue import (
+    KNOWN_PARTICIPANT_MEMORY_HEADER,
+    TEXT_CONVERSATION_BEHAVIOR,
+    TEXT_DEBATE_BEHAVIOR,
+    VOICE_SESSION_BEHAVIOR_LINES,
+    build_language_rule,
+    build_known_participant_fact_line,
+    build_relevant_facts_section,
+    build_rp_canon_section,
+    build_role_profile_lines,
+    build_user_dialogue_summary_line,
+)
 
 
 class PromptMixin:
@@ -27,24 +39,9 @@ class PromptMixin:
 
         lines = [
             self.settings.system_core_prompt,
-            (
-                "RP CANON (from bot_history.json, highest priority):\n"
-                f"{self.rp_canon_prompt}"
-            )
-            if self.rp_canon_prompt
-            else "",
-            f"Role name: {role_profile['name']}",
-            f"Role goal: {role_profile['goal']}",
-            f"Role style: {role_profile['style']}",
-            f"Role constraints: {role_profile['constraints']}",
-            "Voice mode: respond immediately after user stop. Keep emotional presence.",
-            "Voice brevity rule: 1 short sentence. 2 short sentences only when absolutely needed.",
-            "Do not give long explanations unless user explicitly asks for details.",
-            "Always complete the last sentence naturally; never stop mid-sentence.",
-            "Live behavior: keep listening while speaking; if user continues, rebuild response from new details.",
-            (
-                "Discussion mode: if user disagrees, provide one concise counterpoint and one clarifying question."
-            ),
+            build_rp_canon_section(self.rp_canon_prompt),
+            *build_role_profile_lines(role_profile),
+            *VOICE_SESSION_BEHAVIOR_LINES,
         ]
 
         members = getattr(voice_channel, "members", [])
@@ -64,12 +61,12 @@ class PromptMixin:
                     if item.get("fact_value")
                 )
                 if fact_text:
-                    profile_lines.append(f"- {label}: {fact_text}")
+                    profile_lines.append(build_known_participant_fact_line(label, fact_text))
                     added += 1
                 if added >= 6:
                     break
             if profile_lines:
-                lines.append("Known participant memory:")
+                lines.append(KNOWN_PARTICIPANT_MEMORY_HEADER)
                 lines.extend(profile_lines)
 
         return "\n".join(line for line in lines if line)
@@ -103,35 +100,17 @@ class PromptMixin:
 
         system_parts = [
             self.settings.system_core_prompt,
-            (
-                "RP CANON (from bot_history.json, highest priority):\n"
-                f"{self.rp_canon_prompt}"
-            )
-            if self.rp_canon_prompt
-            else "",
-            f"Role name: {role_profile['name']}",
-            f"Role goal: {role_profile['goal']}",
-            f"Role style: {role_profile['style']}",
-            f"Role constraints: {role_profile['constraints']}",
-            (
-                "Conversation behavior: be present and natural, keep momentum, ask meaningful follow-up questions, "
-                "support the user emotionally when needed, and keep discussion intellectually honest."
-            ),
-            (
-                "Debate behavior: when disagreement appears, provide one clear argument and one respectful counterpoint, "
-                "then invite the user to respond."
-            ),
-            f"Always answer in {self.settings.preferred_response_language} unless user explicitly requests another language.",
+            build_rp_canon_section(self.rp_canon_prompt),
+            *build_role_profile_lines(role_profile),
+            TEXT_CONVERSATION_BEHAVIOR,
+            TEXT_DEBATE_BEHAVIOR,
+            build_language_rule(self.settings.preferred_response_language),
         ]
 
         if summary_text:
-            system_parts.append(f"User dialogue memory summary: {summary_text}")
+            system_parts.append(build_user_dialogue_summary_line(summary_text))
         if facts:
-            fact_lines = [
-                f"- [{fact['fact_type']} | c={fact['confidence']:.2f}] {fact['fact_value']}"
-                for fact in facts
-            ]
-            system_parts.append("User memory facts relevant for this turn:\n" + "\n".join(fact_lines))
+            system_parts.append(build_relevant_facts_section(facts))
 
         messages: list[dict[str, str]] = [
             {"role": "system", "content": "\n\n".join(part for part in system_parts if part)}
