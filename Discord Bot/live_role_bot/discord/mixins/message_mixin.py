@@ -345,7 +345,7 @@ class MessageMixin:
             # --- FALLBACK TO LLM ---
             if reply is None:
                 reply = await self.llm.chat(llm_messages)
-                
+
             if len(reply) > self.settings.max_response_chars:
                 reply = truncate(reply, self.settings.max_response_chars)
 
