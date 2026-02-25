@@ -175,6 +175,13 @@ class ConversationSessionState:
     topic_hint: str = ""
     open_loop: str = ""
     tease_level: str = "low"
+    familiarity: str = "new"
+    group_vibe: str = "solo"
+    last_modality: str = "text"
+    turn_count: int = 0
     last_user_text: str = ""
     last_bot_text: str = ""
+    recent_speakers: list[str] = field(default_factory=list)
+    recent_topics: list[str] = field(default_factory=list)
+    callback_moments: list[str] = field(default_factory=list)
     repeated_openers: dict[str, int] = field(default_factory=dict)

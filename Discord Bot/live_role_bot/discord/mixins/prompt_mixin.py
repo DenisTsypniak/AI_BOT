@@ -31,6 +31,10 @@ class PromptMixin:
             f"- mood: {state.mood}",
             f"- energy: {state.energy}",
             f"- tease_level: {state.tease_level}",
+            f"- familiarity: {state.familiarity}",
+            f"- group_vibe: {state.group_vibe}",
+            f"- turn_count: {state.turn_count}",
+            f"- last_modality: {state.last_modality}",
         ]
         if state.topic_hint:
             lines.append(f"- current_topic_hint: {state.topic_hint}")
@@ -38,6 +42,14 @@ class PromptMixin:
             lines.append(f"- unresolved_user_thread: {state.open_loop}")
         if state.last_user_text:
             lines.append(f"- latest_user_tone_sample: {truncate(state.last_user_text, 90)}")
+        if state.recent_speakers:
+            lines.append(f"- recent_speakers: {', '.join(state.recent_speakers[-4:])}")
+        if state.recent_topics:
+            lines.append(f"- recent_topics: {', '.join(state.recent_topics[-4:])}")
+        if state.callback_moments:
+            lines.append("- callback_moments_you_may_reference_naturally:")
+            for item in state.callback_moments[-3:]:
+                lines.append(f"  - {truncate(item, 100)}")
         return "\n".join(lines)
 
     def _build_human_turn_policy_block(self, channel_id: str) -> str:
@@ -48,6 +60,8 @@ class PromptMixin:
             "- Start with varied wording; avoid repeating the same opener every turn.",
             "- Sound like you listened: react to the user's emotional tone before giving advice/info.",
             "- Prefer one useful next step over long explanations.",
+            "- If fitting, briefly callback to one recent session moment/joke/topic (do not force it).",
+            "- In group voice vibe, you may address the group casually, but do not overdo it.",
         ]
         recent = [item for item in self.recent_assistant_replies.get(channel_id, []) if item.strip()]
         if recent:
@@ -72,12 +86,18 @@ class PromptMixin:
                 "constraints": self.settings.role_constraints,
             }
 
+        use_rp_only_character = bool(self.rp_canon_prompt.strip())
         lines = [
-            self.settings.system_core_prompt,
             build_rp_canon_section(self.rp_canon_prompt),
-            *build_role_profile_lines(role_profile),
             *VOICE_SESSION_BEHAVIOR_LINES,
         ]
+        if not use_rp_only_character:
+            lines = [
+                self.settings.system_core_prompt,
+                build_rp_canon_section(self.rp_canon_prompt),
+                *build_role_profile_lines(role_profile),
+                *VOICE_SESSION_BEHAVIOR_LINES,
+            ]
 
         members = getattr(voice_channel, "members", [])
         if isinstance(members, list):
@@ -133,16 +153,26 @@ class PromptMixin:
         facts = await self._select_relevant_facts(guild_id, user_id, user_text)
         history = await self.memory.get_recent_session_messages(session_id, self.settings.max_recent_messages)
 
+        use_rp_only_character = bool(self.rp_canon_prompt.strip())
         system_parts = [
-            self.settings.system_core_prompt,
             build_rp_canon_section(self.rp_canon_prompt),
-            *build_role_profile_lines(role_profile),
             TEXT_CONVERSATION_BEHAVIOR,
             TEXT_DEBATE_BEHAVIOR,
             build_language_rule(self.settings.preferred_response_language),
             self._build_human_turn_policy_block(channel_id),
             self._build_session_state_block(channel_id),
         ]
+        if not use_rp_only_character:
+            system_parts = [
+                self.settings.system_core_prompt,
+                build_rp_canon_section(self.rp_canon_prompt),
+                *build_role_profile_lines(role_profile),
+                TEXT_CONVERSATION_BEHAVIOR,
+                TEXT_DEBATE_BEHAVIOR,
+                build_language_rule(self.settings.preferred_response_language),
+                self._build_human_turn_policy_block(channel_id),
+                self._build_session_state_block(channel_id),
+            ]
 
         if summary_text:
             system_parts.append(build_user_dialogue_summary_line(summary_text))

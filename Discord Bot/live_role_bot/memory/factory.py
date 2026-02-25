@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 from .store import MemoryStore
 
@@ -20,7 +21,7 @@ def _resolve_backend() -> str:
     raise ValueError("MEMORY_BACKEND must be 'sqlite' or 'postgres'")
 
 
-def build_memory_store(sqlite_path: Path) -> MemoryStore:
+def build_memory_store(sqlite_path: Path) -> Any:
     backend = _resolve_backend()
     if backend == "sqlite":
         return MemoryStore(sqlite_path)
@@ -29,9 +30,6 @@ def build_memory_store(sqlite_path: Path) -> MemoryStore:
     if not postgres_dsn:
         raise ValueError("MEMORY_POSTGRES_DSN is required when MEMORY_BACKEND=postgres")
 
-    # Phase 3 scaffold: keep app wiring backend-ready before implementing Postgres storage mixins.
-    raise NotImplementedError(
-        "Postgres memory backend is not implemented yet. "
-        "Set MEMORY_BACKEND=sqlite for now."
-    )
+    from .postgres_store import PostgresMemoryStore
 
+    return PostgresMemoryStore(postgres_dsn)

@@ -20,32 +20,126 @@ class MessageMixin:
             self.conversation_states[channel_key] = state
         return state
 
-    def _update_session_state_from_user(self, channel_key: str, user_text: str) -> None:
+
+    @staticmethod
+    def _remember_recent(items: list[str], value: str, *, limit: int = 6) -> None:
+        cleaned = collapse_spaces(value)
+        if not cleaned:
+            return
+        lowered = cleaned.casefold()
+        items[:] = [item for item in items if item.casefold() != lowered]
+        items.append(cleaned)
+        if len(items) > limit:
+            del items[:-limit]
+
+    def _extract_callback_moment(self, text: str) -> str:
+        cleaned = collapse_spaces(text)
+        if len(cleaned) < 8 or len(cleaned) > 220:
+            return ""
+        if cleaned.startswith(("!", "/", ".")):
+            return ""
+
+        lower = cleaned.casefold()
+        notable_markers = (
+            "хочу",
+            "буду",
+            "завтра",
+            "потім",
+            "сьогодні",
+            "вчора",
+            "жиза",
+            "крінж",
+            "імба",
+            "лол",
+            "bruh",
+            "gg",
+            "аха",
+            "хаха",
+        )
+        if "?" not in cleaned and "!" not in cleaned and not any(marker in lower for marker in notable_markers):
+            return ""
+
+        first_clause = cleaned
+        for sep in ("...", "…", ". ", "! ", "? ", "; "):
+            idx = first_clause.find(sep)
+            if idx >= 0:
+                first_clause = first_clause[: idx + (1 if sep[-1] in ".!?" else 0)]
+                break
+
+        return truncate(first_clause.strip(), 110)
+
+    def _update_session_state_from_user(
+        self,
+        channel_key: str,
+        user_text: str,
+        *,
+        user_label: str | None = None,
+        modality: str | None = None,
+    ) -> None:
         state = self._get_conversation_state(channel_key)
         cleaned = collapse_spaces(user_text)
         if not cleaned:
             return
 
+        state.turn_count += 1
+        if state.turn_count >= 14:
+            state.familiarity = "regular"
+        elif state.turn_count >= 5:
+            state.familiarity = "warm"
+        else:
+            state.familiarity = "new"
+        if modality:
+            state.last_modality = modality
+        if user_label:
+            self._remember_recent(state.recent_speakers, user_label, limit=6)
+            state.group_vibe = "group" if len(state.recent_speakers) >= 2 else "solo"
+
         text_cf = cleaned.casefold()
         tokens = tokenize(cleaned)
-        upset_hits = {"РїРѕРіР°РЅРѕ", "СЃСѓРјРЅРѕ", "Р·Р»РёР№", "Р·Р»Р°", "С‚СЂРёРІРѕРіР°", "stress", "stressed", "РґРµРїСЂРµСЃ", "Р±С–СЃРёС‚СЊ"}
-        playful_hits = {"bruh", "gg", "РєСЂС–РЅР¶", "С–РјР±Р°", "Р»РѕР»", "Р¶РёР·Р°", "РјРµРј", "РєР°Р№С„"}
+        upset_hits = {
+            "погано",
+            "сумно",
+            "злий",
+            "зла",
+            "тривога",
+            "stress",
+            "stressed",
+            "депрес",
+            "бісить",
+        }
+        playful_hits = {
+            "bruh",
+            "gg",
+            "крінж",
+            "імба",
+            "лол",
+            "жиза",
+            "мем",
+            "кайф",
+        }
         tech_hits = {
             "discord",
             "voice",
             "mic",
-            "РјС–Рє",
+            "мік",
             "audio",
-            "Р·РІСѓРє",
-            "Р±РѕС‚",
+            "звук",
+            "бот",
             "role",
             "server",
             "ping",
             "lag",
-            "РєРѕРґ",
+            "код",
             "python",
         }
-        sleepy_hits = {"СЃРїР»СЋ", "СЃРѕРЅРЅРёР№", "СЃРѕРЅРЅР°", "РІС‚РѕРј", "tired", "sleepy"}
+        sleepy_hits = {
+            "сплю",
+            "сонний",
+            "сонна",
+            "втом",
+            "tired",
+            "sleepy",
+        }
 
         if any(k in text_cf for k in sleepy_hits):
             state.mood = "sleepy"
@@ -64,7 +158,7 @@ class MessageMixin:
 
         if "!" in cleaned or cleaned.isupper():
             state.energy = "high"
-        elif "..." in cleaned or "вЂ¦" in cleaned:
+        elif "..." in cleaned or "…" in cleaned:
             state.energy = "low"
         elif state.energy not in {"low", "high"}:
             state.energy = "medium"
@@ -75,6 +169,10 @@ class MessageMixin:
         topic_words = [w for w in cleaned.split() if len(w) >= 3]
         if topic_words:
             state.topic_hint = truncate(" ".join(topic_words[:8]), 72)
+            self._remember_recent(state.recent_topics, truncate(" ".join(topic_words[:4]), 60), limit=6)
+        callback_moment = self._extract_callback_moment(cleaned)
+        if callback_moment:
+            self._remember_recent(state.callback_moments, callback_moment, limit=5)
         state.last_user_text = truncate(cleaned, 220)
 
     def _looks_like_detail_request(self, user_text: str) -> bool:
@@ -82,13 +180,13 @@ class MessageMixin:
         if not text:
             return False
         markers = (
-            "РґРµС‚Р°Р»",
-            "РїРѕРґСЂРѕР±",
-            "СЂРѕР·Р¶СѓР№",
-            "РґРѕРєР»Р°РґРЅРѕ",
-            "РїРѕСЏСЃРЅРё",
-            "С‡РѕРјСѓ",
-            "СЏРє СЃР°РјРµ",
+            "детал",
+            "подроб",
+            "розжуй",
+            "докладно",
+            "поясни",
+            "чому",
+            "як саме",
             "why",
             "explain",
             "details",
@@ -122,19 +220,19 @@ class MessageMixin:
         if not cleaned:
             return text
         parts = cleaned.split(maxsplit=1)
-        opener = parts[0].strip(",:.!?()[]{}\"'").casefold()
+        opener = parts[0].strip(":,.!?()[]{}\"'").casefold()
         if not opener:
             return text
         if state.repeated_openers.get(opener, 0) < 2:
             return text
 
         replacements = {
-            "РЅСѓ": "СЃР»СѓС…Р°Р№,",
-            "РєРѕСЂРѕС‡": "Р№РѕР№,",
-            "Р№РѕР№": "РЅСѓ С€Рѕ,",
-            "СЃР»СѓС…Р°Р№": "РєРѕСЂРѕС‡,",
-            "РѕРє": "С‚Р° РѕРє,",
-            "Р°РіР°": "РїРѕРЅ,",
+            "ну": "слухай,",
+            "короч": "йой,",
+            "йой": "ну шо,",
+            "слухай": "короч,",
+            "ок": "та ок,",
+            "ага": "пон,",
         }
         repl = replacements.get(opener)
         if not repl:
@@ -143,6 +241,42 @@ class MessageMixin:
         prefix = text[: len(text) - len(cleaned)]
         return (prefix + f"{repl} {tail}".strip()).strip()
 
+    def _apply_human_reaction_prefix(self, channel_key: str, user_text: str, text: str, modality: str) -> str:
+        state = self._get_conversation_state(channel_key)
+        if modality != "voice":
+            return text
+
+        cleaned = text.lstrip()
+        if not cleaned:
+            return text
+
+        first_token = cleaned.split(maxsplit=1)[0].strip(":,.!?()[]{}\"'").casefold()
+        if first_token in {
+            "ну",
+            "йой",
+            "ага",
+            "ок",
+            "короч",
+            "слухай",
+            "bruh",
+            "мм",
+            "ех",
+        }:
+            return text
+        if self._looks_like_detail_request(user_text) or len(cleaned) > 240:
+            return text
+
+        prefix_options = {
+            "supportive": ["Йой, ", "Та блін, "],
+            "playful": ["Аха, ", "bruh, ", "Йой, "],
+            "focused": ["Ок, ", "Та дивись, "],
+            "sleepy": ["Мм, ", "Ех, "],
+            "neutral": ["Ага, ", "Ну шо, "],
+        }
+        options = prefix_options.get(state.mood, prefix_options["neutral"])
+        choice = options[state.turn_count % len(options)]
+        return f"{choice}{cleaned}" if text == cleaned else f"{text[:len(text)-len(cleaned)]}{choice}{cleaned}"
+
     def _shape_human_reply(self, channel_key: str, user_text: str, reply: str, modality: str) -> str:
         shaped = reply.strip()
         if not shaped:
@@ -150,9 +284,19 @@ class MessageMixin:
 
         shaped = self._limit_question_count(shaped, max_questions=1)
         shaped = self._vary_repeated_opener(channel_key, shaped)
+        shaped = self._apply_human_reaction_prefix(channel_key, user_text, shaped, modality)
+
+        if modality == "voice" and "\n" in shaped and not self._looks_like_detail_request(user_text):
+            shaped = collapse_spaces(shaped.replace("\n", " "))
 
         if not self._looks_like_detail_request(user_text):
-            soft_limit = 360 if modality == "text" else 220
+            state = self._get_conversation_state(channel_key)
+            if modality == "voice":
+                soft_limit = 210 if state.energy == "high" else 240
+                if state.mood == "supportive":
+                    soft_limit = min(soft_limit, 220)
+            else:
+                soft_limit = 340 if state.familiarity == "regular" else 380
             if len(shaped) > soft_limit:
                 shaped = truncate(shaped, soft_limit)
 
@@ -168,7 +312,7 @@ class MessageMixin:
         if not cleaned:
             return
         state.last_bot_text = truncate(cleaned, 220)
-        opener = cleaned.split(maxsplit=1)[0].strip(",:.!?()[]{}\"'").casefold()
+        opener = cleaned.split(maxsplit=1)[0].strip(":,.!?()[]{}\"'").casefold()
         if opener:
             state.repeated_openers[opener] = state.repeated_openers.get(opener, 0) + 1
             if len(state.repeated_openers) > 20:
@@ -198,7 +342,7 @@ class MessageMixin:
 
         lock = self.channel_locks[channel_key]
         async with lock:
-            self._update_session_state_from_user(channel_key, user_text)
+            self._update_session_state_from_user(channel_key, cleaned, user_label=user_label, modality="voice")
             role_id = await self._resolve_role(guild_key)
             session_id = await self.memory.get_or_create_session(
                 guild_id=guild_key,
@@ -451,6 +595,7 @@ class MessageMixin:
             )
 
             clean_user_text = collapse_spaces(user_text)
+            self._update_session_state_from_user(channel_key, clean_user_text, user_label=user_label, modality=modality)
             user_message_id = await self.memory.save_message(
                 session_id=session_id,
                 guild_id=guild_key,
@@ -510,7 +655,7 @@ class MessageMixin:
                     except Exception as e:
                         plugin_used = True
                         logger.error("Plugin %s failed to execute: %s", plugin.name, e)
-                        reply = "РћР№, СЃС‚Р°Р»Р°СЃСЏ РїРѕРјРёР»РєР° РїСЂРё РІРёРєРѕРЅР°РЅРЅС– РІРЅСѓС‚СЂС–С€РЅСЊРѕС— РєРѕРјР°РЅРґРё."
+                        reply = "Ой, сталася помилка при виконанні внутрішньої команди."
 
             # --- FALLBACK TO LLM ---
             if reply is None:

@@ -123,10 +123,11 @@ class LiveRoleDiscordBot(
             logger.info("Loaded RP canon from %s (%s chars)", path, len(prompt))
             return prompt
         if not path.exists():
-            logger.warning("bot_history.json not found at %s; using default role prompts", path)
-        else:
-            logger.warning("Failed to use RP canon from %s; using default role prompts", path)
-        return ""
+            raise RuntimeError(f"bot_history.json not found at {path}. This bot requires bot_history.json as the character source.")
+        raise RuntimeError(
+            f"Failed to load usable RP canon from {path}. "
+            "Ensure JSON is valid, enabled=true, and contains non-empty system_prompt/style_persona_prompt."
+        )
 
     async def setup_hook(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -165,6 +166,9 @@ class LiveRoleDiscordBot(
 
         await self._run_shutdown_step("memory_extractor.close", self.memory_extractor.close(), timeout=6.0)
         await self._run_shutdown_step("llm.close", self.llm.close(), timeout=6.0)
+        memory_close = getattr(self.memory, "close", None)
+        if callable(memory_close):
+            await self._run_shutdown_step("memory.close", memory_close(), timeout=6.0)
         await self._run_shutdown_step("discord.Client.close", super().close(), timeout=6.0)
 
     async def _run_shutdown_step(self, label: str, coro: object, *, timeout: float) -> None:

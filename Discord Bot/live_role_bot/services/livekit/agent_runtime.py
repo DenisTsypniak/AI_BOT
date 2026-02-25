@@ -66,6 +66,11 @@ class _RuntimeDeps:
 
 def _build_prompt_context(base_settings: Settings, lk_settings: LiveKitAgentSettings) -> _PromptContext:
     rp_canon = load_rp_canon(lk_settings.bot_history_json_path)
+    if not rp_canon.strip():
+        raise RuntimeError(
+            f"LiveKit agent requires a valid character file at {lk_settings.bot_history_json_path}. "
+            "Ensure bot_history.json is present, enabled=true, and contains prompt text."
+        )
     return _PromptContext(
         system_core_prompt=base_settings.system_core_prompt,
         preferred_language=base_settings.preferred_response_language,
@@ -79,20 +84,19 @@ def _build_prompt_context(base_settings: Settings, lk_settings: LiveKitAgentSett
 
 def _build_livekit_instructions(ctx: _PromptContext) -> str:
     lines = [
-        ctx.system_core_prompt.strip(),
-        f"Role name: {ctx.role_name}",
-        f"Role goal: {ctx.role_goal}",
-        f"Role style: {ctx.role_style}",
-        f"Role constraints: {ctx.role_constraints}",
+        "RP CANON (highest priority, character source):\n" + ctx.rp_canon_prompt.strip(),
         f"Primary language: {ctx.preferred_language}.",
         "Context: You are speaking in a realtime voice room. Keep replies speech-friendly and natural.",
         "Voice turn policy: default to 1-3 short sentences unless user explicitly asks for details.",
         "Voice turn policy: react first, then give one useful point, then optionally one short question.",
         "Voice turn policy: vary openers and avoid repeating the same phrasing across consecutive turns.",
         "Voice turn policy: if audio is unclear, ask for a repeat in a natural human way.",
+        "Human continuity: remember the last few turns in this room and callback naturally when relevant.",
+        "Human continuity: do not sound like each reply starts a brand-new conversation.",
+        "Group voice behavior: if multiple people are talking, handle it casually and keep replies short/reactive.",
+        "Group voice behavior: you may address the group briefly (for example 'народ' or 'чуваки') but do not spam it.",
+        "Emotion matching: if someone sounds upset/serious, reduce memes and answer calmly/supportively.",
     ]
-    if ctx.rp_canon_prompt:
-        lines.append("RP CANON (highest priority):\n" + ctx.rp_canon_prompt)
 
     base = "\n".join(part for part in lines if part).strip()
     return build_native_audio_system_instruction(base, ctx.preferred_language)
