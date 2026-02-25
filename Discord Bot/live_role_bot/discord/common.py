@@ -142,6 +142,9 @@ class PendingProfileUpdate:
     user_id: str
     message_id: int
     user_text: str
+    modality: str = "text"
+    source: str = "unknown"
+    quality: float = 1.0
 
 
 @dataclass(slots=True)
@@ -157,6 +160,8 @@ class VoiceTurnBuffer:
     started_at: float = 0.0
     last_voice_at: float = 0.0
     user_label: str = "User"
+    reply_enabled: bool = True
+    transcript_source: str = "local_stt"
 
 
 @dataclass(slots=True)
@@ -166,6 +171,8 @@ class PendingVoiceTurn:
     user_id: int
     user_label: str
     pcm_48k_stereo: bytes
+    reply_enabled: bool = True
+    transcript_source: str = "local_stt"
 
 
 @dataclass(slots=True)

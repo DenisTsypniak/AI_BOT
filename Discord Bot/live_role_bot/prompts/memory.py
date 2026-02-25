@@ -11,15 +11,19 @@ _DEFAULTS = {
             {
                 "key": "string",
                 "value": "string",
-                "type": "identity|preference|goal|context|relationship|constraint",
+                "type": "identity|preference|style_preference|goal|context|relationship|constraint|boundary|episodic|topic",
                 "confidence": 0.0,
                 "importance": 0.0,
             }
         ]
     },
     "fact_extractor_system_prompt": (
-        "Extract only durable user facts that can personalize future dialogue. "
-        "Ignore temporary filler and repeated greetings. "
+        "Extract only user facts that can improve future personalization. "
+        "Prioritize durable facts (identity, preferences, goals, constraints, relationship context) and reusable interaction style preferences "
+        "(e.g., likes short replies, wants step-by-step help, language preference). "
+        "You may keep lightweight episodic moments only if they are likely useful as future callbacks. "
+        "Ignore temporary filler, greetings, obvious noise, and random one-off phrases. "
+        "Avoid sensitive data unless the user explicitly shared it and it is directly relevant to future assistance. "
         "If no durable facts exist, return facts: []."
     ),
     "fact_extractor_user_prompt_template": "Preferred language: {preferred_language}\nUser utterance: {text}\nReturn JSON.",

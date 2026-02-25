@@ -131,6 +131,7 @@ class Settings:
     voice_auto_join_on_mention: bool
     voice_auto_capture: bool
     voice_send_transcripts_to_text: bool
+    voice_bridge_memory_stt_enabled: bool
     voice_silence_rms: int
     voice_silence_ms: int
     voice_min_turn_ms: int
@@ -199,6 +200,7 @@ class Settings:
             ),
             voice_auto_capture=_env_bool("VOICE_AUTO_CAPTURE", True),
             voice_send_transcripts_to_text=_env_bool("VOICE_SEND_TRANSCRIPTS_TO_TEXT", False),
+            voice_bridge_memory_stt_enabled=_env_bool("VOICE_BRIDGE_MEMORY_STT_ENABLED", True),
             voice_silence_rms=_env_int("VOICE_SILENCE_RMS", 95),
             voice_silence_ms=_env_int("VOICE_SILENCE_MS", 520),
             voice_min_turn_ms=_env_int("VOICE_MIN_TURN_MS", 420, aliases=("LOCAL_STT_MIN_AUDIO_MS",)),

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import aiosqlite
+
 from .storage.facts import MemoryFactsMixin
 from .storage.identity import MemoryIdentityMixin
 from .storage.messages import MemoryMessagesMixin
@@ -20,3 +22,8 @@ class MemoryStore(
 ):
     """Persistent live-dialogue memory store with session history, summaries and fact evidence."""
 
+    backend_name = "sqlite"
+
+    async def ping(self) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("SELECT 1")

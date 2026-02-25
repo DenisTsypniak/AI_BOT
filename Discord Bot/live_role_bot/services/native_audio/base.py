@@ -88,6 +88,31 @@ class _NativeAudioBase:
         state = self._states.get(guild_id)
         return state is not None and not state.stop_event.is_set()
 
+    def status_snapshot(self) -> dict[str, object]:
+        sessions: list[dict[str, object]] = []
+        for guild_id, state in self._states.items():
+            sessions.append(
+                {
+                    "guild_id": guild_id,
+                    "voice_channel_id": state.voice_channel_id,
+                    "text_channel_id": state.text_channel_id,
+                    "ready": bool(state.ready_event.is_set()),
+                    "ready_error": state.ready_error or "",
+                    "stop_requested": bool(state.stop_event.is_set()),
+                    "input_queue": int(state.input_queue.qsize()),
+                    "playback_queue": int(state.playback_queue.qsize()),
+                    "playback_active": bool(state.playback_active),
+                    "last_speaker_name": state.last_speaker_name or "",
+                    "run_task_alive": bool(state.run_task is not None and not state.run_task.done()),
+                }
+            )
+        return {
+            "enabled": True,
+            "model_candidates": list(self.models),
+            "sessions": sessions,
+            "session_count": len(sessions),
+        }
+
     def push_pcm(self, guild_id: int, user_id: int, user_name: str, pcm_48k_stereo: bytes) -> None:
         loop = self._loop
         if loop is None or loop.is_closed():

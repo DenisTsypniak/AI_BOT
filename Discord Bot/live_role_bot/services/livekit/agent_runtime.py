@@ -255,10 +255,27 @@ async def _handle_session(ctx: Any) -> None:
         try:
             wait_job_task: asyncio.Task[bool] | None = None
             wait_close_task: asyncio.Task[bool] | None = None
+            start_kwargs: dict[str, Any] = {}
+            room_options_ctor = getattr(room_io, "RoomOptions", None)
+            audio_input_ctor = getattr(room_io, "AudioInputOptions", None)
+            if room_options_ctor is not None:
+                ro_kwargs: dict[str, Any] = {}
+                if lk_settings.auto_subscribe_audio_only:
+                    # New API path (avoids deprecated RoomInputOptions warning).
+                    if audio_input_ctor is not None:
+                        ro_kwargs["audio_input"] = audio_input_ctor()
+                    else:
+                        ro_kwargs["audio_input"] = True
+                    ro_kwargs["video_input"] = False
+                start_kwargs["room_options"] = room_options_ctor(**ro_kwargs)
+            else:
+                # Compatibility fallback for older livekit-agents versions.
+                start_kwargs["room_input_options"] = room_io.RoomInputOptions(**room_input_kwargs)
+
             await session.start(
                 agent=LizaVoiceAgent(),
                 room=ctx.room,
-                room_input_options=room_io.RoomInputOptions(**room_input_kwargs),
+                **start_kwargs,
             )
             health.mark_activity()
             logger.info("[livekit.room] session started room=%s", room_name)

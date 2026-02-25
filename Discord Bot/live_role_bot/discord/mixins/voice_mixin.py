@@ -202,8 +202,21 @@ class VoiceMixin:
             self._seen_voice_pcm_users.add(key)
             logger.info("[voice.input] first PCM packet from user=%s guild=%s", user_id, guild_id)
 
-        if getattr(self, "livekit_bridge", None) is not None and self.livekit_bridge.has_session(guild_id):
-            self.livekit_bridge.push_pcm(guild_id, user_id, user_label, pcm_48k_stereo)
+        loop = self._loop
+        bridge = getattr(self, "livekit_bridge", None)
+        if bridge is not None and bridge.has_session(guild_id):
+            bridge.push_pcm(guild_id, user_id, user_label, pcm_48k_stereo)
+            if getattr(self, "bridge_voice_memory_transcript_enabled", False):
+                if loop is not None and not loop.is_closed():
+                    loop.call_soon_threadsafe(
+                        self._ingest_voice_pcm,
+                        guild_id,
+                        user_id,
+                        user_label,
+                        pcm_48k_stereo,
+                        False,  # reply is produced by LiveKit agent, local STT is for memory only
+                        "bridge_local_stt",
+                    )
             return
 
         if self.settings.gemini_native_audio_enabled:
@@ -211,18 +224,27 @@ class VoiceMixin:
                 self.native_audio.push_pcm(guild_id, user_id, user_label, pcm_48k_stereo)
             return
 
-        loop = self._loop
         if loop is None or loop.is_closed():
             return
-        loop.call_soon_threadsafe(self._ingest_voice_pcm, guild_id, user_id, user_label, pcm_48k_stereo)
+        loop.call_soon_threadsafe(self._ingest_voice_pcm, guild_id, user_id, user_label, pcm_48k_stereo, True, "local_stt")
 
-    def _ingest_voice_pcm(self, guild_id: int, user_id: int, user_label: str, pcm_48k_stereo: bytes) -> None:
+    def _ingest_voice_pcm(
+        self,
+        guild_id: int,
+        user_id: int,
+        user_label: str,
+        pcm_48k_stereo: bytes,
+        reply_enabled: bool = True,
+        transcript_source: str = "local_stt",
+    ) -> None:
         if not pcm_48k_stereo:
             return
 
         now = time.monotonic()
         key = (guild_id, user_id)
         state = self.voice_buffers.setdefault(key, VoiceTurnBuffer())
+        state.reply_enabled = bool(reply_enabled)
+        state.transcript_source = transcript_source or state.transcript_source
 
         try:
             rms = int(audioop.rms(pcm_48k_stereo, 2))
@@ -266,6 +288,8 @@ class VoiceMixin:
             user_id=user_id,
             user_label=state.user_label,
             pcm_48k_stereo=pcm,
+            reply_enabled=bool(state.reply_enabled),
+            transcript_source=state.transcript_source or "local_stt",
         )
 
         if self.voice_turn_queue.full():
@@ -320,6 +344,18 @@ class VoiceMixin:
                     if member is not None:
                         with contextlib.suppress(Exception):
                             item.user_label = await self._sync_member_identity(item.guild_id, member)
+
+                if not item.reply_enabled:
+                    await self._save_native_user_transcript(
+                        guild_id=item.guild_id,
+                        channel_id=item.channel_id,
+                        user_id=item.user_id,
+                        user_label=item.user_label,
+                        text=transcript,
+                        source=item.transcript_source or "bridge_local_stt",
+                        quality=result.confidence,
+                    )
+                    continue
 
                 reply = await self._run_dialogue_turn(
                     guild_id=item.guild_id,

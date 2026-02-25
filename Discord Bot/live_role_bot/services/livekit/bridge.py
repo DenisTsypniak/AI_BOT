@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -15,6 +16,7 @@ except ModuleNotFoundError:
     import audioop_lts as audioop  # type: ignore[import-not-found]
 
 from ..native_audio.audio import StreamingPCMAudioSource
+from ...discord.common import collapse_spaces
 from .config import LiveKitAgentSettings
 from .observability import HealthHeartbeat, LiveKitRuntimeHealth
 
@@ -135,6 +137,7 @@ class _BridgeSessionState:
     heartbeat: HealthHeartbeat | None = None
     health: LiveKitRuntimeHealth | None = None
     discord_ingress_started_emitted: bool = False
+    seen_transcription_segment_ids: set[str] = field(default_factory=set)
 
 
 class LiveKitDiscordBridgeManager:
@@ -166,6 +169,38 @@ class LiveKitDiscordBridgeManager:
     def has_session(self, guild_id: int) -> bool:
         state = self._sessions.get(guild_id)
         return state is not None and not state.stop_event.is_set()
+
+    def status_snapshot(self) -> dict[str, object]:
+        sessions: list[dict[str, object]] = []
+        now = time.monotonic()
+        for guild_id, state in self._sessions.items():
+            idle_sec = None
+            if state.health is not None:
+                idle_sec = max(0.0, now - float(state.health.last_activity_at))
+            sessions.append(
+                {
+                    "guild_id": guild_id,
+                    "voice_channel_id": state.voice_channel_id,
+                    "text_channel_id": state.text_channel_id,
+                    "room_name": state.room_name,
+                    "pcm_queue": int(state.pcm_queue.qsize()),
+                    "remote_streams": len(state.remote_tasks),
+                    "dispatch_id": state.agent_dispatch_id or "",
+                    "dispatch_owned": bool(state.agent_dispatch_owned),
+                    "ingress_active": bool(state.discord_ingress_started_emitted),
+                    "sender_task_alive": bool(state.sender_task is not None and not state.sender_task.done()),
+                    "idle_sec": idle_sec,
+                }
+            )
+
+        return {
+            "enabled": True,
+            "room_prefix": self.settings.room_prefix,
+            "control_channel": self.settings.bridge_control_channel,
+            "bindings": len(self.registry.bindings),
+            "sessions": sessions,
+            "session_count": len(sessions),
+        }
 
     def bind_channel(
         self,
@@ -500,12 +535,25 @@ class LiveKitDiscordBridgeManager:
             pub_sid = str(getattr(publication, "sid", "") or "")
             loop.call_soon_threadsafe(self._cancel_remote_task, guild_id, pub_sid)
 
+        def _on_transcription_received(segments: Any, participant: Any, publication: Any) -> None:
+            del publication
+            loop = self._loop
+            if loop is None or loop.is_closed():
+                return
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(
+                    self._handle_transcription_received(guild_id, segments, participant),
+                    name=f"lk-bridge-transcription-{guild_id}",
+                )
+            )
+
         room.on("connected", _on_connected)
         room.on("disconnected", _on_disconnected)
         room.on("reconnecting", _on_reconnecting)
         room.on("reconnected", _on_reconnected)
         room.on("track_subscribed", _on_track_subscribed)
         room.on("track_unsubscribed", _on_track_unsubscribed)
+        room.on("transcription_received", _on_transcription_received)
 
     async def _attach_existing_remote_audio_tracks(self, state: _BridgeSessionState) -> None:
         participants = getattr(state.room, "remote_participants", {}) or {}
@@ -556,6 +604,53 @@ class LiveKitDiscordBridgeManager:
             send_text=False,
             best_effort=True,
         )
+
+    async def _handle_transcription_received(self, guild_id: int, segments: Any, participant: Any) -> None:
+        state = self._sessions.get(guild_id)
+        if state is None or state.stop_event.is_set():
+            return
+
+        participant_identity = str(getattr(participant, "identity", "") or "")
+        if participant_identity and participant_identity == state.identity:
+            # This is the bridge participant itself (mixed Discord input). We prefer
+            # per-user Discord-side STT for memory so speaker attribution is preserved.
+            return
+
+        final_chunks: list[str] = []
+        for seg in list(segments or []):
+            try:
+                if not bool(getattr(seg, "final", False)):
+                    continue
+                seg_id = str(getattr(seg, "id", "") or "")
+                if seg_id and seg_id in state.seen_transcription_segment_ids:
+                    continue
+                text = collapse_spaces(str(getattr(seg, "text", "") or ""))
+                if not text:
+                    continue
+                if seg_id:
+                    state.seen_transcription_segment_ids.add(seg_id)
+                final_chunks.append(text)
+            except Exception:
+                continue
+
+        if len(state.seen_transcription_segment_ids) > 800:
+            state.seen_transcription_segment_ids.clear()
+
+        joined = collapse_spaces(" ".join(final_chunks))
+        if not joined:
+            return
+
+        # Persist assistant transcript in memory so summaries/context see both sides of the voice dialogue.
+        cb = getattr(self.client, "on_native_audio_assistant_transcript", None)
+        if callable(cb):
+            with contextlib.suppress(Exception):
+                await cb(
+                    guild_id=guild_id,
+                    text=joined,
+                    source=f"livekit_transcription:{participant_identity or 'remote'}",
+                )
+        if state.health is not None:
+            state.health.mark_activity()
 
     def _cancel_remote_task(self, guild_id: int, pub_sid: str) -> None:
         if not pub_sid:

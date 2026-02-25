@@ -363,7 +363,16 @@ class MessageMixin:
                 source=source,
                 quality=quality,
             )
-        self._enqueue_profile_update(guild_key, channel_key, user_key, message_id, cleaned)
+        self._enqueue_profile_update(
+            guild_key,
+            channel_key,
+            user_key,
+            message_id,
+            cleaned,
+            modality="voice",
+            source=source,
+            quality=quality,
+        )
         self._enqueue_summary_update(guild_key, channel_key, user_key)
 
     async def _save_native_assistant_transcript(
@@ -414,6 +423,98 @@ class MessageMixin:
                 kwargs["reference"] = reference
             await channel.send(chunk, **kwargs)
 
+    def _format_status_report(self, snapshot: dict[str, Any]) -> str:
+        uptime_sec = float(snapshot.get("uptime_sec", 0.0) or 0.0)
+        uptime = f"{uptime_sec:.1f}s"
+        memory_backend = str(snapshot.get("memory_backend", "?"))
+        memory_ping_ok = bool(snapshot.get("memory_ping_ok"))
+        memory_ping_error = str(snapshot.get("memory_ping_error") or "")
+        queues = snapshot.get("queues", {}) if isinstance(snapshot.get("queues"), dict) else {}
+        workers = snapshot.get("workers", {}) if isinstance(snapshot.get("workers"), dict) else {}
+        voice_clients = snapshot.get("voice_clients", [])
+        bridge = snapshot.get("livekit_bridge", {}) if isinstance(snapshot.get("livekit_bridge"), dict) else {}
+        native = snapshot.get("native_audio", {}) if isinstance(snapshot.get("native_audio"), dict) else {}
+        plugins = snapshot.get("plugins", {}) if isinstance(snapshot.get("plugins"), dict) else {}
+        voice_ingest = snapshot.get("voice_ingest", {}) if isinstance(snapshot.get("voice_ingest"), dict) else {}
+
+        lines = [
+            "Bot Status",
+            f"- user: {snapshot.get('user') or '-'}",
+            f"- uptime: {uptime}",
+            f"- guilds: {snapshot.get('guilds', 0)}",
+            f"- memory: {memory_backend} ({'ok' if memory_ping_ok else 'error'})",
+        ]
+        if memory_ping_error:
+            lines.append(f"- memory_error: {truncate(memory_ping_error, 180)}")
+
+        lines.extend(
+            [
+                f"- queues: profile={queues.get('profile', '?')} summary={queues.get('summary', '?')} voice={queues.get('voice_turn', '?')}",
+                (
+                    "- workers: "
+                    f"profile={'on' if workers.get('profile') else 'off'} "
+                    f"summary={'on' if workers.get('summary') else 'off'} "
+                    f"voice={'on' if workers.get('voice') else 'off'} "
+                    f"flush={'on' if workers.get('voice_flush') else 'off'}"
+                ),
+                (
+                    "- voice_ingest: "
+                    f"worker={'on' if voice_ingest.get('worker_enabled') else 'off'} "
+                    f"fallback={'on' if voice_ingest.get('local_fallback_enabled') else 'off'} "
+                    f"bridge_memory_stt={'on' if voice_ingest.get('bridge_memory_stt_enabled') else 'off'}"
+                ),
+                f"- plugins: enabled={'yes' if plugins.get('enabled') else 'no'} loaded={'yes' if plugins.get('loaded') else 'no'}",
+            ]
+        )
+
+        if isinstance(voice_clients, list) and voice_clients:
+            lines.append(f"- discord_voice_clients: {len(voice_clients)}")
+            for row in voice_clients[:4]:
+                if not isinstance(row, dict):
+                    continue
+                lines.append(
+                    "  "
+                    + f"{row.get('guild_name', '?')} -> {row.get('channel_name', '?')} "
+                    + f"(connected={'yes' if row.get('connected') else 'no'}, playing={'yes' if row.get('playing') else 'no'})"
+                )
+        else:
+            lines.append("- discord_voice_clients: 0")
+
+        lines.append(
+            f"- livekit_bridge: {'enabled' if bridge.get('enabled') else 'disabled'} "
+            f"(sessions={bridge.get('session_count', 0)}, bindings={bridge.get('bindings', 0)})"
+        )
+        bridge_sessions = bridge.get("sessions", [])
+        if isinstance(bridge_sessions, list) and bridge_sessions:
+            for row in bridge_sessions[:4]:
+                if not isinstance(row, dict):
+                    continue
+                idle = row.get("idle_sec")
+                idle_text = f"{float(idle):.1f}s" if isinstance(idle, (int, float)) else "-"
+                lines.append(
+                    "  "
+                    + f"room={row.get('room_name', '?')} pcm_q={row.get('pcm_queue', '?')} "
+                    + f"remote={row.get('remote_streams', '?')} idle={idle_text}"
+                )
+
+        lines.append(
+            f"- native_audio: {'enabled' if native.get('enabled') else 'disabled'} "
+            f"(sessions={native.get('session_count', 0)})"
+        )
+        native_sessions = native.get("sessions", [])
+        if isinstance(native_sessions, list) and native_sessions:
+            for row in native_sessions[:4]:
+                if not isinstance(row, dict):
+                    continue
+                lines.append(
+                    "  "
+                    + f"guild={row.get('guild_id', '?')} ready={'yes' if row.get('ready') else 'no'} "
+                    + f"in_q={row.get('input_queue', '?')} out_q={row.get('playback_queue', '?')} "
+                    + f"playback={'yes' if row.get('playback_active') else 'no'}"
+                )
+
+        return "\n".join(lines)
+
     async def _try_handle_system_command(self, message: discord.Message) -> bool:
         raw = collapse_spaces(message.content)
         if not raw:
@@ -424,6 +525,17 @@ class MessageMixin:
 
         command = raw[len(prefix) :].strip().lower()
         join_label = f"{prefix}join"
+        status_label = f"{prefix}status"
+
+        if command == "status":
+            try:
+                snapshot = await self.build_status_snapshot()
+                await self._send_chunks(message.channel, self._format_status_report(snapshot), reference=message)
+            except Exception as exc:
+                logger.exception("Status command failed: %s", exc)
+                await message.reply(f"`{status_label}` failed. Check bot logs.")
+            return True
+
         if command != "join":
             return False
 
@@ -623,6 +735,9 @@ class MessageMixin:
                 user_id=user_key,
                 message_id=user_message_id,
                 user_text=clean_user_text,
+                modality=modality,
+                source=source,
+                quality=quality,
             )
             self._enqueue_summary_update(guild_key, channel_key, user_key)
 

@@ -18,6 +18,10 @@ class WorkersMixin:
         user_id: str,
         message_id: int,
         user_text: str,
+        *,
+        modality: str = "text",
+        source: str = "unknown",
+        quality: float = 1.0,
     ) -> None:
         if not self.settings.memory_enabled:
             return
@@ -27,6 +31,9 @@ class WorkersMixin:
             user_id=user_id,
             message_id=message_id,
             user_text=user_text,
+            modality=modality,
+            source=source,
+            quality=float(quality),
         )
 
         if self.profile_queue.full():
@@ -41,10 +48,58 @@ class WorkersMixin:
         except asyncio.QueueFull:
             pass
 
+    def _should_extract_profile_update(self, item: PendingProfileUpdate) -> bool:
+        text = collapse_spaces(item.user_text)
+        if len(text) < 6:
+            return False
+        if text.startswith(("!", "/", ".", "#")):
+            return False
+
+        lower = text.casefold()
+        # Skip common backchannel/filler turns that create noisy facts.
+        filler = {
+            "ага",
+            "агаа",
+            "ок",
+            "окей",
+            "окейй",
+            "пон",
+            "поняв",
+            "понявв",
+            "ясно",
+            "та",
+            "угу",
+            "мм",
+            "мг",
+            "yes",
+            "no",
+            "ok",
+            "okay",
+            "yeah",
+            "nah",
+            "lol",
+            "gg",
+            "bruh",
+        }
+        if lower in filler:
+            return False
+
+        if item.modality == "voice":
+            # Be slightly stricter on STT-driven memory extraction to reduce garbage facts.
+            min_conf = max(float(self.settings.transcription_min_confidence), 0.54)
+            if float(item.quality) < min_conf:
+                return False
+            if len(text) < 10 and "?" not in text and "!" not in text:
+                return False
+
+        return True
+
     async def _profile_worker(self) -> None:
         while True:
             item = await self.profile_queue.get()
             try:
+                if not self._should_extract_profile_update(item):
+                    continue
                 result = await self.memory_extractor.extract(
                     user_text=item.user_text,
                     preferred_language=self.settings.preferred_response_language,
@@ -56,6 +111,11 @@ class WorkersMixin:
                 for fact in result.facts:
                     if not fact.value:
                         continue
+                    extractor_name = "gemini_profile_extractor"
+                    if item.modality == "voice":
+                        extractor_name = f"{extractor_name}:voice"
+                    if item.source:
+                        extractor_name = f"{extractor_name}:{item.source}"
                     await self.memory.upsert_user_fact(
                         guild_id=item.guild_id,
                         user_id=item.user_id,
@@ -65,7 +125,7 @@ class WorkersMixin:
                         confidence=fact.confidence,
                         importance=fact.importance,
                         message_id=item.message_id,
-                        extractor="gemini_profile_extractor",
+                        extractor=extractor_name[:120],
                     )
                     saved += 1
 

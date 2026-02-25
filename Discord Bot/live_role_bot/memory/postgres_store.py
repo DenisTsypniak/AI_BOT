@@ -15,6 +15,7 @@ class PostgresMemoryStore:
     """Postgres-backed memory store implementing the same API as MemoryStore."""
 
     SCHEMA_VERSION = 7
+    backend_name = "postgres"
 
     def __init__(self, dsn: str) -> None:
         self.dsn = dsn.strip()
@@ -43,6 +44,11 @@ class PostgresMemoryStore:
             await self._pool.close()
             self._pool = None
         self._initialized = False
+
+    async def ping(self) -> None:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("SELECT 1")
 
     async def init(self) -> None:
         async with self._init_lock:
@@ -799,4 +805,3 @@ class PostgresMemoryStore:
             }
             for row in rows
         ]
-

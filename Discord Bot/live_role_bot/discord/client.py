@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections import defaultdict
 
 import discord
@@ -112,9 +113,19 @@ class LiveRoleDiscordBot(
                 except Exception as exc:
                     logger.error("Failed to initialize LiveKit bridge manager: %s", exc)
         self.local_voice_fallback_enabled = self.settings.local_stt_enabled and not self.settings.gemini_native_audio_enabled
+        self.bridge_voice_memory_transcript_enabled = bool(
+            self.settings.local_stt_enabled
+            and self.settings.memory_enabled
+            and self.settings.voice_bridge_memory_stt_enabled
+            and self.livekit_bridge is not None
+        )
+        self.local_voice_ingest_enabled = bool(
+            self.local_voice_fallback_enabled or self.bridge_voice_memory_transcript_enabled
+        )
         install_voice_recv_decode_guard()
 
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._started_at_monotonic = time.monotonic()
 
     def _load_bot_history_prompt(self) -> str:
         path = self.settings.bot_history_json_path
@@ -148,7 +159,7 @@ class LiveRoleDiscordBot(
 
         self.profile_worker_task = asyncio.create_task(self._profile_worker(), name="profile-worker")
         self.summary_worker_task = asyncio.create_task(self._summary_worker(), name="summary-worker")
-        if self.local_voice_fallback_enabled:
+        if self.local_voice_ingest_enabled:
             self.voice_worker_task = asyncio.create_task(self._voice_worker(), name="voice-worker")
             self.voice_flush_task = asyncio.create_task(self._voice_flush_loop(), name="voice-flush")
 
@@ -201,3 +212,76 @@ class LiveRoleDiscordBot(
     async def on_ready(self) -> None:
         if self.user:
             logger.info("Connected as %s (%s)", self.user, self.user.id)
+
+    @staticmethod
+    def _task_alive(task: asyncio.Task[None] | None) -> bool:
+        return bool(task is not None and not task.done())
+
+    async def build_status_snapshot(self) -> dict[str, object]:
+        snapshot: dict[str, object] = {
+            "uptime_sec": max(0.0, time.monotonic() - self._started_at_monotonic),
+            "user": str(self.user) if self.user else "",
+            "guilds": len(self.guilds),
+            "memory_backend": str(getattr(self.memory, "backend_name", type(self.memory).__name__)),
+            "memory_ping_ok": False,
+            "memory_ping_error": "",
+            "queues": {
+                "profile": int(self.profile_queue.qsize()),
+                "summary": int(self.summary_queue.qsize()),
+                "voice_turn": int(self.voice_turn_queue.qsize()),
+            },
+            "workers": {
+                "profile": self._task_alive(self.profile_worker_task),
+                "summary": self._task_alive(self.summary_worker_task),
+                "voice": self._task_alive(self.voice_worker_task),
+                "voice_flush": self._task_alive(self.voice_flush_task),
+            },
+            "voice_clients": [],
+            "livekit_bridge": {"enabled": False},
+            "native_audio": {"enabled": False},
+            "plugins": {
+                "enabled": bool(self.settings.plugins_enabled),
+                "loaded": bool(self.plugin_manager is not None),
+            },
+            "voice_ingest": {
+                "local_fallback_enabled": bool(self.local_voice_fallback_enabled),
+                "bridge_memory_stt_enabled": bool(self.bridge_voice_memory_transcript_enabled),
+                "worker_enabled": bool(self.local_voice_ingest_enabled),
+            },
+        }
+
+        ping_fn = getattr(self.memory, "ping", None)
+        if callable(ping_fn):
+            try:
+                await asyncio.wait_for(ping_fn(), timeout=2.5)
+                snapshot["memory_ping_ok"] = True
+            except Exception as exc:
+                snapshot["memory_ping_error"] = str(exc)
+
+        voice_clients: list[dict[str, object]] = []
+        for guild in self.guilds:
+            vc = guild.voice_client
+            if vc is None or getattr(vc, "channel", None) is None:
+                continue
+            channel = getattr(vc, "channel", None)
+            voice_clients.append(
+                {
+                    "guild_id": int(guild.id),
+                    "guild_name": str(guild.name),
+                    "channel_id": int(getattr(channel, "id", 0) or 0),
+                    "channel_name": str(getattr(channel, "name", "?")),
+                    "connected": bool(getattr(vc, "is_connected", lambda: False)()),
+                    "playing": bool(getattr(vc, "is_playing", lambda: False)()),
+                }
+            )
+        snapshot["voice_clients"] = voice_clients
+
+        if self.livekit_bridge is not None:
+            with contextlib.suppress(Exception):
+                snapshot["livekit_bridge"] = self.livekit_bridge.status_snapshot()
+
+        if self.native_audio is not None:
+            with contextlib.suppress(Exception):
+                snapshot["native_audio"] = self.native_audio.status_snapshot()
+
+        return snapshot

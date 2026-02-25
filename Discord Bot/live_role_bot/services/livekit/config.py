@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -117,3 +118,8 @@ class LiveKitAgentSettings:
         # `setdefault()` is not enough because `.env` may contain `GOOGLE_API_KEY=` (blank string).
         if self.google_api_key:
             os.environ["GOOGLE_API_KEY"] = self.google_api_key
+            # Avoid noisy warning from google-genai when both keys are set in the same process.
+            # LiveKit runtime uses GOOGLE_API_KEY explicitly after resolving fallback from GEMINI_API_KEY.
+            with contextlib.suppress(Exception):
+                if os.environ.get("GEMINI_API_KEY"):
+                    os.environ.pop("GEMINI_API_KEY", None)

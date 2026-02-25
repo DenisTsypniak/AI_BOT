@@ -4,16 +4,15 @@
       {
         "key": "string",
         "value": "string",
-        "type": "identity|preference|goal|context|relationship|constraint",
+        "type": "identity|preference|style_preference|goal|context|relationship|constraint|boundary|episodic|topic",
         "confidence": 0.0,
         "importance": 0.0
       }
     ]
   },
-  "fact_extractor_system_prompt": "Extract only durable user facts that can personalize future dialogue. Ignore temporary filler and repeated greetings. If no durable facts exist, return facts: [].",
+  "fact_extractor_system_prompt": "Extract only user facts that can improve future personalization. Prioritize durable facts (identity, preferences, goals, constraints, relationship context) and reusable interaction style preferences (for example, likes short replies or step-by-step help). You may keep lightweight episodic moments only if they are likely useful as future callbacks. Ignore temporary filler, greetings, obvious noise, and random one-off phrases. Avoid sensitive data unless the user explicitly shared it and it is directly relevant to future assistance. If no durable facts exist, return facts: [].",
   "fact_extractor_user_prompt_template": "Preferred language: {preferred_language}\nUser utterance: {text}\nReturn JSON.",
   "json_only_system_prompt_template": "Return only valid JSON object with no markdown and no additional commentary. Schema hint: {schema_hint}",
   "summary_update_system_prompt_template": "Update rolling memory summary for one user's ongoing dialogue with assistant. Keep durable topics, preferences, goals, unresolved items, emotional context. Output plain text, max {max_chars} chars.",
   "summary_update_user_prompt_template": "Previous summary:\n{previous_summary}\n\nRecent dialogue:\n{dialogue_lines}\n\nReturn updated summary."
 }
-
