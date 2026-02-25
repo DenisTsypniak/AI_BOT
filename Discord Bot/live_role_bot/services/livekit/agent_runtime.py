@@ -32,8 +32,10 @@ _bootstrap_local_venv()
 from ...config import Settings
 from ...discord.common import collapse_spaces, load_rp_canon
 from ...memory.factory import build_memory_store
+from ...memory.extractor import MemoryExtractor
 from ...prompts.dialogue import build_relevant_facts_section, build_user_dialogue_summary_line
 from ...prompts.voice import build_native_audio_system_instruction
+from ...services.gemini_client import GeminiClient
 from .bridge import DiscordLiveKitBridge, LiveKitBridgeConfig
 from .config import LiveKitAgentSettings
 from .observability import HealthHeartbeat, LiveKitRuntimeHealth
@@ -68,6 +70,8 @@ class _RuntimeDeps:
     google: Any
     silero: Any | None
     health: "LiveKitRuntimeHealth"
+    backfill_extractor: MemoryExtractor | None
+    backfill_llm: GeminiClient | None
 
 
 @dataclass(slots=True)
@@ -93,6 +97,9 @@ class _BridgeRuntimeContextState:
     last_memory_focus_user_id: str = ""
     last_memory_focus_label: str = ""
     last_memory_hash: str = ""
+    memory_backfill_attempts: int = 0
+    memory_backfill_saved: int = 0
+    memory_backfill_skipped: int = 0
 
 
 def _build_prompt_context(base_settings: Settings, lk_settings: LiveKitAgentSettings) -> _PromptContext:
@@ -333,13 +340,14 @@ def _recent_user_line_score(text: str) -> float:
     return score
 
 
-def _select_recent_user_memory_lines(rows: list[dict[str, Any]], *, limit: int = 2) -> list[str]:
+def _select_recent_user_memory_candidates(rows: list[dict[str, Any]], *, limit: int = 2) -> list[dict[str, Any]]:
     seen: set[str] = set()
-    candidates: list[tuple[float, int, str]] = []
+    candidates: list[tuple[float, int, int, str]] = []
     for idx, row in enumerate(rows):
         try:
             role = str(row.get("role") or "").strip().lower()
             text = collapse_spaces(str(row.get("content") or ""))
+            message_id = int(row.get("message_id") or 0)
         except Exception:
             continue
         if role != "user" or not text:
@@ -351,7 +359,7 @@ def _select_recent_user_memory_lines(rows: list[dict[str, Any]], *, limit: int =
         score = _recent_user_line_score(text)
         # Bias toward more recent rows while still allowing older "remember this" lines to win.
         score += idx * 0.05
-        candidates.append((score, idx, text))
+        candidates.append((score, idx, message_id, text))
 
     if not candidates:
         return []
@@ -360,12 +368,110 @@ def _select_recent_user_memory_lines(rows: list[dict[str, Any]], *, limit: int =
     top = candidates[: max(1, int(limit))]
     # Return in chronological order for readability in prompt.
     top.sort(key=lambda item: item[1])
-    return [item[2] for item in top]
+    return [
+        {"message_id": int(item[2]), "text": item[3], "score": float(item[0])}
+        for item in top
+    ]
+
+
+def _memory_backfill_candidate_ok(candidate: dict[str, Any]) -> bool:
+    try:
+        text = collapse_spaces(str(candidate.get("text") or ""))
+        score = float(candidate.get("score") or 0.0)
+    except Exception:
+        return False
+    if not text:
+        return False
+    # Skip obvious ephemeral low-signal turns.
+    if len(text) < 10 and "?" in text:
+        return False
+    return score >= 0.8
+
+
+async def _maybe_backfill_facts_from_recent_candidates(
+    *,
+    memory_store: Any | None,
+    extractor: MemoryExtractor | None,
+    runtime_ctx: _BridgeRuntimeContextState,
+    room_name: str,
+    guild_id: str,
+    user_id: str,
+    candidates: list[dict[str, Any]],
+    cache: dict[str, Any],
+    preferred_language: str,
+) -> None:
+    if memory_store is None or extractor is None:
+        return
+    promoted_ids = cache.setdefault("promoted_message_ids", set())
+    if not isinstance(promoted_ids, set):
+        promoted_ids = set()
+        cache["promoted_message_ids"] = promoted_ids
+    for candidate in candidates[:2]:
+        if not _memory_backfill_candidate_ok(candidate):
+            runtime_ctx.memory_backfill_skipped += 1
+            continue
+        message_id = int(candidate.get("message_id") or 0)
+        text = collapse_spaces(str(candidate.get("text") or ""))
+        if not message_id or not text:
+            runtime_ctx.memory_backfill_skipped += 1
+            continue
+        if message_id in promoted_ids:
+            runtime_ctx.memory_backfill_skipped += 1
+            continue
+        runtime_ctx.memory_backfill_attempts += 1
+        try:
+            result = await extractor.extract(text, preferred_language)
+            if result is None or not result.facts:
+                promoted_ids.add(message_id)
+                runtime_ctx.memory_backfill_skipped += 1
+                continue
+            saved = 0
+            for fact in result.facts:
+                if not str(fact.value or "").strip():
+                    continue
+                # Slightly stricter than profile worker because this path is opportunistic.
+                if float(fact.confidence) < 0.55 and float(fact.importance) < 0.55:
+                    continue
+                await memory_store.upsert_user_fact(
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    fact_key=fact.key,
+                    fact_value=fact.value,
+                    fact_type=fact.fact_type,
+                    confidence=float(fact.confidence),
+                    importance=float(fact.importance),
+                    message_id=message_id,
+                    extractor="gemini_profile_extractor:voice_retrieval_backfill",
+                )
+                saved += 1
+            promoted_ids.add(message_id)
+            if saved:
+                runtime_ctx.memory_backfill_saved += saved
+                logger.info(
+                    "[livekit.mem] backfill saved room=%s user=%s message_id=%s facts=%s",
+                    room_name,
+                    user_id,
+                    message_id,
+                    saved,
+                )
+            else:
+                runtime_ctx.memory_backfill_skipped += 1
+        except Exception as exc:
+            runtime_ctx.memory_updates_errors += 1
+            runtime_ctx.last_memory_error = f"backfill:{type(exc).__name__}"
+            logger.debug(
+                "[livekit.mem] backfill failed room=%s user=%s message_id=%s: %s",
+                room_name,
+                user_id,
+                message_id,
+                exc,
+            )
 
 
 async def _build_voice_memory_overlay_block(
     *,
     memory_store: Any | None,
+    extractor: MemoryExtractor | None,
     base_settings: Settings,
     packet: dict[str, Any] | None,
     room_name: str,
@@ -405,7 +511,19 @@ async def _build_voice_memory_overlay_block(
                 # Fetch deeper history so explicit "remember this" user statements survive beyond a few turns.
                 recent_rows = await get_recent_dialogue_messages(guild_id, channel_id, user_id, 48)
         facts = _select_voice_memory_facts(base_settings, raw_facts)
-        recent_user_lines = _select_recent_user_memory_lines(recent_rows, limit=3)
+        recent_candidates = _select_recent_user_memory_candidates(recent_rows, limit=3)
+        recent_user_lines = [str(item.get("text") or "") for item in recent_candidates if str(item.get("text") or "").strip()]
+        await _maybe_backfill_facts_from_recent_candidates(
+            memory_store=memory_store,
+            extractor=extractor,
+            runtime_ctx=runtime_ctx,
+            room_name=room_name,
+            guild_id=guild_id,
+            user_id=user_id,
+            candidates=recent_candidates,
+            cache=cache,
+            preferred_language=base_settings.preferred_response_language,
+        )
         summary_text = str((summary_row or {}).get("summary_text") or "").strip()
         lines = ["PERSISTED USER MEMORY (voice retrieval, lower priority than RP CANON):"]
         label = focus.get("label", "")
@@ -578,6 +696,31 @@ def _load_runtime_deps() -> _RuntimeDeps:
 
     google, silero = _import_livekit_plugins(lk_settings.use_silero_vad)
     health = LiveKitRuntimeHealth(worker_name=lk_settings.worker_name, agent_name=lk_settings.agent_name)
+    backfill_llm: GeminiClient | None = None
+    backfill_extractor: MemoryExtractor | None = None
+    try:
+        if base_settings.memory_enabled and base_settings.gemini_api_key:
+            backfill_llm = GeminiClient(
+                api_key=base_settings.gemini_api_key,
+                model=base_settings.gemini_model,
+                timeout_seconds=max(20, int(base_settings.gemini_timeout_seconds)),
+                temperature=0.1,
+                max_output_tokens=800,
+                base_url=base_settings.gemini_base_url,
+            )
+            backfill_extractor = MemoryExtractor(
+                enabled=True,
+                llm=backfill_llm,
+                candidate_limit=max(1, int(base_settings.memory_candidate_fact_limit or 6)),
+            )
+            with contextlib.suppress(Exception):
+                awaitable_start = getattr(backfill_llm, "start", None)
+                if callable(awaitable_start):
+                    # `_load_runtime_deps` is sync; defer explicit startup to first use if needed.
+                    pass
+    except Exception:
+        backfill_llm = None
+        backfill_extractor = None
     return _RuntimeDeps(
         base_settings=base_settings,
         lk_settings=lk_settings,
@@ -585,6 +728,8 @@ def _load_runtime_deps() -> _RuntimeDeps:
         google=google,
         silero=silero,
         health=health,
+        backfill_extractor=backfill_extractor,
+        backfill_llm=backfill_llm,
     )
 
 
@@ -598,6 +743,8 @@ async def _handle_session(ctx: Any) -> None:
     base_settings = deps.base_settings
     lk_settings = deps.lk_settings
     health = deps.health
+    backfill_extractor = deps.backfill_extractor
+    backfill_llm = deps.backfill_llm
 
     _, agent_types, _ = _import_livekit_modules()
     Agent, _, AgentSession, room_io = agent_types
@@ -765,6 +912,7 @@ async def _handle_session(ctx: Any) -> None:
                 )
                 memory_block = await _build_voice_memory_overlay_block(
                     memory_store=memory_store,
+                    extractor=backfill_extractor,
                     base_settings=base_settings,
                     packet=packet_obj,
                     room_name=room_name,
@@ -923,6 +1071,9 @@ async def _handle_session(ctx: Any) -> None:
                 close_memory = getattr(memory_store, "close", None)
                 if callable(close_memory):
                     await close_memory()
+            with contextlib.suppress(Exception):
+                if backfill_llm is not None:
+                    await backfill_llm.close()
             health.rooms_closed += 1
             health.mark_activity()
             logger.info("[livekit.room] session closed room=%s", room_name)

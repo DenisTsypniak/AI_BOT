@@ -418,7 +418,7 @@ class LiveKitDiscordBridgeManager:
                 "text_channel_id": text_channel_id,
                 "room_name": room_name,
             },
-            send_text=True,
+            send_text=False,
         )
         await self._publish_context_snapshot(state, reason="bridge_started", force=True, best_effort=True)
 
@@ -470,7 +470,7 @@ class LiveKitDiscordBridgeManager:
             state,
             event="bridge_stopping",
             payload={"room_name": state.room_name},
-            send_text=True,
+            send_text=False,
             best_effort=True,
         )
 
@@ -550,7 +550,7 @@ class LiveKitDiscordBridgeManager:
                         state,
                         event="agent_dispatch_existing",
                         payload={"agent_name": agent_name, "dispatch_id": state.agent_dispatch_id or ""},
-                        send_text=True,
+                        send_text=False,
                         best_effort=True,
                     )
                     await self._publish_context_snapshot(state, reason="agent_dispatch_existing", force=True, best_effort=True)
@@ -574,7 +574,7 @@ class LiveKitDiscordBridgeManager:
                 state,
                 event="agent_dispatch_created",
                 payload={"agent_name": agent_name, "dispatch_id": state.agent_dispatch_id or ""},
-                send_text=True,
+                send_text=False,
                 best_effort=True,
             )
             await self._publish_context_snapshot(state, reason="agent_dispatch_created", force=True, best_effort=True)
@@ -584,7 +584,7 @@ class LiveKitDiscordBridgeManager:
                 state,
                 event="agent_dispatch_failed",
                 payload={"agent_name": agent_name, "error": str(exc)},
-                send_text=True,
+                send_text=False,
                 best_effort=True,
             )
             await self._publish_context_snapshot(state, reason="agent_dispatch_failed", force=True, best_effort=True)
