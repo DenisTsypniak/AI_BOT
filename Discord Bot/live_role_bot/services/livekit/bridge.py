@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import time
@@ -137,7 +138,34 @@ class _BridgeSessionState:
     heartbeat: HealthHeartbeat | None = None
     health: LiveKitRuntimeHealth | None = None
     discord_ingress_started_emitted: bool = False
+    last_ingress_user_id: str = ""
+    last_ingress_user_label: str = ""
+    last_ingress_unix: float = 0.0
     seen_transcription_segment_ids: set[str] = field(default_factory=set)
+    context_sync_task: asyncio.Task[None] | None = None
+    context_sync_seq: int = 0
+    last_context_sent_at: float = 0.0
+    last_context_sent_unix: float = 0.0
+    last_context_hash: str = ""
+    last_context_reason: str = ""
+    last_context_publish_error: str = ""
+    last_context_payload_bytes: int = 0
+    context_publish_attempts: int = 0
+    context_publish_success: int = 0
+    context_publish_skipped_throttle: int = 0
+    context_publish_skipped_unchanged: int = 0
+    context_publish_errors: int = 0
+    agent_ctx_updates_received: int = 0
+    agent_ctx_updates_applied: int = 0
+    agent_ctx_updates_ignored: int = 0
+    agent_ctx_updates_errors: int = 0
+    agent_ctx_ack_invalid: int = 0
+    agent_ctx_last_seq: int = 0
+    agent_ctx_last_reason: str = ""
+    agent_ctx_last_chars: int = 0
+    agent_ctx_last_error: str = ""
+    agent_ctx_last_ack_unix: float = 0.0
+    agent_ctx_sender_identity: str = ""
 
 
 class LiveKitDiscordBridgeManager:
@@ -173,10 +201,38 @@ class LiveKitDiscordBridgeManager:
     def status_snapshot(self) -> dict[str, object]:
         sessions: list[dict[str, object]] = []
         now = time.monotonic()
+        ctx_attempts = 0
+        ctx_published = 0
+        ctx_skipped = 0
+        ctx_publish_errors = 0
+        agent_rx = 0
+        agent_apply = 0
+        agent_ignored = 0
+        agent_errors = 0
+        agent_ack_invalid = 0
         for guild_id, state in self._sessions.items():
             idle_sec = None
             if state.health is not None:
                 idle_sec = max(0.0, now - float(state.health.last_activity_at))
+            ctx_attempts += int(state.context_publish_attempts)
+            ctx_published += int(state.context_publish_success)
+            ctx_skipped += int(state.context_publish_skipped_throttle + state.context_publish_skipped_unchanged)
+            ctx_publish_errors += int(state.context_publish_errors)
+            agent_rx += int(state.agent_ctx_updates_received)
+            agent_apply += int(state.agent_ctx_updates_applied)
+            agent_ignored += int(state.agent_ctx_updates_ignored)
+            agent_errors += int(state.agent_ctx_updates_errors)
+            agent_ack_invalid += int(state.agent_ctx_ack_invalid)
+            last_ctx_age_sec = (
+                max(0.0, time.time() - float(state.last_context_sent_unix))
+                if float(state.last_context_sent_unix or 0.0) > 0
+                else None
+            )
+            last_ack_age_sec = (
+                max(0.0, time.time() - float(state.agent_ctx_last_ack_unix))
+                if float(state.agent_ctx_last_ack_unix or 0.0) > 0
+                else None
+            )
             sessions.append(
                 {
                     "guild_id": guild_id,
@@ -189,6 +245,32 @@ class LiveKitDiscordBridgeManager:
                     "dispatch_owned": bool(state.agent_dispatch_owned),
                     "ingress_active": bool(state.discord_ingress_started_emitted),
                     "sender_task_alive": bool(state.sender_task is not None and not state.sender_task.done()),
+                    "context_sync_task_alive": bool(
+                        state.context_sync_task is not None and not state.context_sync_task.done()
+                    ),
+                    "context_seq": int(state.context_sync_seq),
+                    "last_context_reason": str(state.last_context_reason or ""),
+                    "last_context_error": str(state.last_context_publish_error or ""),
+                    "last_context_sent_unix": float(state.last_context_sent_unix or 0.0),
+                    "last_context_payload_bytes": int(state.last_context_payload_bytes or 0),
+                    "context_publish_attempts": int(state.context_publish_attempts or 0),
+                    "context_publish_success": int(state.context_publish_success or 0),
+                    "context_publish_skipped_throttle": int(state.context_publish_skipped_throttle or 0),
+                    "context_publish_skipped_unchanged": int(state.context_publish_skipped_unchanged or 0),
+                    "context_publish_errors": int(state.context_publish_errors or 0),
+                    "last_context_age_sec": last_ctx_age_sec,
+                    "agent_ctx_updates_received": int(state.agent_ctx_updates_received or 0),
+                    "agent_ctx_updates_applied": int(state.agent_ctx_updates_applied or 0),
+                    "agent_ctx_updates_ignored": int(state.agent_ctx_updates_ignored or 0),
+                    "agent_ctx_updates_errors": int(state.agent_ctx_updates_errors or 0),
+                    "agent_ctx_ack_invalid": int(state.agent_ctx_ack_invalid or 0),
+                    "agent_ctx_last_seq": int(state.agent_ctx_last_seq or 0),
+                    "agent_ctx_last_reason": str(state.agent_ctx_last_reason or ""),
+                    "agent_ctx_last_chars": int(state.agent_ctx_last_chars or 0),
+                    "agent_ctx_last_error": str(state.agent_ctx_last_error or ""),
+                    "agent_ctx_last_ack_unix": float(state.agent_ctx_last_ack_unix or 0.0),
+                    "agent_ctx_sender_identity": str(state.agent_ctx_sender_identity or ""),
+                    "agent_ctx_last_ack_age_sec": last_ack_age_sec,
                     "idle_sec": idle_sec,
                 }
             )
@@ -197,6 +279,21 @@ class LiveKitDiscordBridgeManager:
             "enabled": True,
             "room_prefix": self.settings.room_prefix,
             "control_channel": self.settings.bridge_control_channel,
+            "context_topic": self.settings.bridge_context_topic,
+            "context_sync_enabled": bool(self.settings.bridge_context_sync_enabled),
+            "context_sync": {
+                "attempts": ctx_attempts,
+                "published": ctx_published,
+                "skipped": ctx_skipped,
+                "skipped_throttle": sum(int(getattr(s, "context_publish_skipped_throttle", 0) or 0) for s in self._sessions.values()),
+                "skipped_unchanged": sum(int(getattr(s, "context_publish_skipped_unchanged", 0) or 0) for s in self._sessions.values()),
+                "publish_errors": ctx_publish_errors,
+                "agent_updates_received": agent_rx,
+                "agent_updates_applied": agent_apply,
+                "agent_updates_ignored": agent_ignored,
+                "agent_updates_errors": agent_errors,
+                "agent_ack_invalid": agent_ack_invalid,
+            },
             "bindings": len(self.registry.bindings),
             "sessions": sessions,
             "session_count": len(sessions),
@@ -236,12 +333,14 @@ class LiveKitDiscordBridgeManager:
         loop.call_soon_threadsafe(self._enqueue_pcm, guild_id, user_id, user_label, pcm_48k_stereo)
 
     def _enqueue_pcm(self, guild_id: int, user_id: int, user_label: str, pcm_48k_stereo: bytes) -> None:
-        del user_id, user_label  # Mixed bridge feed currently uses one published track.
         if not pcm_48k_stereo:
             return
         state = self._sessions.get(guild_id)
         if state is None or state.stop_event.is_set():
             return
+        state.last_ingress_user_id = str(user_id or "")
+        state.last_ingress_user_label = self._trim_label(user_label, 48)
+        state.last_ingress_unix = float(time.time())
         if state.pcm_queue.full():
             with contextlib.suppress(asyncio.QueueEmpty):
                 state.pcm_queue.get_nowait()
@@ -303,6 +402,11 @@ class LiveKitDiscordBridgeManager:
         self._sessions[guild_id] = state
         binding.active = True
         state.sender_task = asyncio.create_task(self._sender_loop(state), name=f"lk-bridge-sender-{guild_id}")
+        if self._context_sync_enabled():
+            state.context_sync_task = asyncio.create_task(
+                self._context_sync_loop(state),
+                name=f"lk-bridge-context-sync-{guild_id}",
+            )
 
         await self._ensure_agent_dispatched(state)
         await self._emit_status(
@@ -316,6 +420,7 @@ class LiveKitDiscordBridgeManager:
             },
             send_text=True,
         )
+        await self._publish_context_snapshot(state, reason="bridge_started", force=True, best_effort=True)
 
         # Attach already subscribed tracks if any were present before callbacks fired.
         await self._attach_existing_remote_audio_tracks(state)
@@ -345,6 +450,10 @@ class LiveKitDiscordBridgeManager:
             state.sender_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
                 await asyncio.wait_for(state.sender_task, timeout=0.75)
+        if state.context_sync_task is not None:
+            state.context_sync_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(state.context_sync_task, timeout=0.75)
 
         if state.discord_source is not None:
             with contextlib.suppress(Exception):
@@ -444,6 +553,7 @@ class LiveKitDiscordBridgeManager:
                         send_text=True,
                         best_effort=True,
                     )
+                    await self._publish_context_snapshot(state, reason="agent_dispatch_existing", force=True, best_effort=True)
                     return
 
             req = self._api.CreateAgentDispatchRequest(
@@ -467,6 +577,7 @@ class LiveKitDiscordBridgeManager:
                 send_text=True,
                 best_effort=True,
             )
+            await self._publish_context_snapshot(state, reason="agent_dispatch_created", force=True, best_effort=True)
         except Exception as exc:
             logger.warning("[bridge.live] agent dispatch failed room=%s agent=%s: %s", state.room_name, agent_name, exc)
             await self._emit_status(
@@ -476,6 +587,7 @@ class LiveKitDiscordBridgeManager:
                 send_text=True,
                 best_effort=True,
             )
+            await self._publish_context_snapshot(state, reason="agent_dispatch_failed", force=True, best_effort=True)
         finally:
             with contextlib.suppress(Exception):
                 await lkapi.aclose()
@@ -499,10 +611,373 @@ class LiveKitDiscordBridgeManager:
                 with contextlib.suppress(Exception):
                     await lkapi.aclose()
 
+    def _context_sync_enabled(self) -> bool:
+        return bool(getattr(self.settings, "bridge_context_sync_enabled", True))
+
+    def _context_min_interval_seconds(self) -> float:
+        return max(0.1, float(int(getattr(self.settings, "bridge_context_min_interval_ms", 1200))) / 1000.0)
+
+    def _context_force_interval_seconds(self) -> float:
+        return max(1.0, float(int(getattr(self.settings, "bridge_context_force_interval_seconds", 12))))
+
+    @staticmethod
+    def _trim_label(value: object, limit: int = 80) -> str:
+        text = collapse_spaces(str(value or ""))
+        if len(text) <= limit:
+            return text
+        if limit <= 3:
+            return text[:limit]
+        return text[: limit - 3].rstrip() + "..."
+
+    def _build_context_snapshot(self, state: _BridgeSessionState) -> dict[str, Any]:
+        guild = self.client.get_guild(state.guild_id)
+        voice_channel = guild.get_channel(state.voice_channel_id) if guild is not None else None
+        text_channel = self.client.get_channel(state.text_channel_id)
+        voice_members = list(getattr(voice_channel, "members", []) or [])
+
+        participants: list[dict[str, Any]] = []
+        humans = 0
+        bots = 0
+        for member in voice_members:
+            is_bot = bool(getattr(member, "bot", False))
+            if is_bot:
+                bots += 1
+            else:
+                humans += 1
+            participants.append(
+                {
+                    "user_id": str(getattr(member, "id", "") or ""),
+                    "display_name": self._trim_label(getattr(member, "display_name", getattr(member, "name", "")), 48),
+                    "bot": is_bot,
+                    "is_bot": is_bot,
+                    "self_mute": bool(getattr(getattr(member, "voice", None), "self_mute", False)),
+                    "self_deaf": bool(getattr(getattr(member, "voice", None), "self_deaf", False)),
+                    "mute": bool(getattr(getattr(member, "voice", None), "mute", False)),
+                    "deaf": bool(getattr(getattr(member, "voice", None), "deaf", False)),
+                }
+            )
+        participants.sort(key=lambda p: (bool(p.get("bot")), str(p.get("display_name") or "").casefold()))
+
+        active_speaker_hints: list[str] = []
+        with contextlib.suppress(Exception):
+            active = list(getattr(state.room, "active_speakers", []) or [])
+            for item in active[:8]:
+                identity = self._trim_label(getattr(item, "identity", ""), 48)
+                if identity:
+                    active_speaker_hints.append(identity)
+
+        remote_participants = getattr(state.room, "remote_participants", {}) or {}
+        remote_values = remote_participants.values() if isinstance(remote_participants, dict) else []
+        livekit_participants = []
+        for participant in list(remote_values):
+            identity = str(getattr(participant, "identity", "") or "")
+            if identity == state.identity:
+                continue
+            livekit_participants.append(
+                {
+                    "identity": self._trim_label(identity, 64),
+                    "sid": str(getattr(participant, "sid", "") or ""),
+                }
+            )
+
+        return {
+            "version": 1,
+            "guild": {
+                "id": str(state.guild_id),
+                "name": self._trim_label(getattr(guild, "name", ""), 80),
+            },
+            "voice_channel": {
+                "id": str(state.voice_channel_id),
+                "name": self._trim_label(getattr(voice_channel, "name", ""), 80),
+            },
+            "text_channel": {
+                "id": str(state.text_channel_id),
+                "name": self._trim_label(getattr(text_channel, "name", ""), 80),
+            },
+            "participants": {
+                "count": len(participants),
+                "humans": humans,
+                "bots": bots,
+                "members": participants[:24],
+                "active_speaker_hints": active_speaker_hints[:8],
+            },
+            "bridge_runtime": {
+                "remote_streams": len(state.remote_tasks),
+                "ingress_active": bool(state.discord_ingress_started_emitted),
+                "dispatch_id": state.agent_dispatch_id or "",
+                "dispatch_owned": bool(state.agent_dispatch_owned),
+                "last_ingress_user_id": str(state.last_ingress_user_id or ""),
+                "last_ingress_user_label": self._trim_label(state.last_ingress_user_label, 48),
+                "last_ingress_unix": float(state.last_ingress_unix or 0.0),
+            },
+            "livekit_room": {
+                "name": state.room_name,
+                "remote_participants": livekit_participants[:24],
+            },
+            "context_sync": {
+                "seq": int(state.context_sync_seq or 0),
+                "last_reason": str(state.last_context_reason or ""),
+                "last_sent_unix": float(state.last_context_sent_unix or 0.0),
+                "last_error": str(state.last_context_publish_error or ""),
+            },
+        }
+
+    async def _publish_context_snapshot(
+        self,
+        state: _BridgeSessionState,
+        *,
+        reason: str,
+        force: bool = False,
+        best_effort: bool = True,
+    ) -> None:
+        if not self._context_sync_enabled():
+            return
+        if state.stop_event.is_set():
+            return
+        state.context_publish_attempts += 1
+        now = time.monotonic()
+        now_unix = time.time()
+        min_interval = self._context_min_interval_seconds()
+        if (not force) and state.last_context_sent_at > 0 and (now - state.last_context_sent_at) < min_interval:
+            state.context_publish_skipped_throttle += 1
+            return
+
+        snapshot = self._build_context_snapshot(state)
+        payload_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        payload_hash = hashlib.sha1(payload_json.encode("utf-8", errors="ignore")).hexdigest()
+        force_interval = self._context_force_interval_seconds()
+        unchanged = bool(payload_hash and payload_hash == state.last_context_hash)
+        if unchanged and (not force) and state.last_context_sent_at > 0 and (now - state.last_context_sent_at) < force_interval:
+            state.context_publish_skipped_unchanged += 1
+            return
+
+        state.context_sync_seq += 1
+        updated_at_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_unix))
+        packet = {
+            "event": "bridge_context_snapshot",
+            "source": "discord-livekit-bridge",
+            "version": 1,
+            "seq": int(state.context_sync_seq),
+            "guild_id": state.guild_id,
+            "voice_channel_id": state.voice_channel_id,
+            "text_channel_id": state.text_channel_id,
+            "room_name": state.room_name,
+            "reason": reason,
+            "updated_at_unix": round(now_unix, 3),
+            "updated_at_iso": updated_at_iso,
+            "payload": snapshot,
+        }
+        try:
+            packet_text = json.dumps(packet, ensure_ascii=False)
+            await state.room.local_participant.publish_data(
+                packet_text,
+                reliable=True,
+                topic=str(getattr(self.settings, "bridge_context_topic", "bridge-context") or "bridge-context"),
+            )
+            state.last_context_sent_at = now
+            state.last_context_sent_unix = now_unix
+            state.last_context_hash = payload_hash
+            state.last_context_reason = reason
+            state.last_context_publish_error = ""
+            state.last_context_payload_bytes = len(packet_text.encode("utf-8", errors="ignore"))
+            state.context_publish_success += 1
+            if state.health is not None:
+                state.health.mark_activity()
+        except Exception as exc:
+            state.last_context_publish_error = str(exc)
+            state.context_publish_errors += 1
+            if best_effort:
+                if state.context_publish_errors == 1 or (state.context_publish_errors % 10) == 0:
+                    logger.warning(
+                        "[bridge.live] context publish failed guild=%s room=%s reason=%s errors=%s: %s",
+                        state.guild_id,
+                        state.room_name,
+                        reason,
+                        state.context_publish_errors,
+                        exc,
+                    )
+            if not best_effort:
+                logger.debug(
+                    "[bridge.live] context publish_data failed guild=%s room=%s reason=%s: %s",
+                    state.guild_id,
+                    state.room_name,
+                    reason,
+                    exc,
+                )
+
+    async def _context_sync_loop(self, state: _BridgeSessionState) -> None:
+        if not self._context_sync_enabled():
+            return
+        while not state.stop_event.is_set():
+            try:
+                await asyncio.sleep(max(1.0, self._context_force_interval_seconds() / 2.0))
+                if state.stop_event.is_set():
+                    break
+                await self._publish_context_snapshot(
+                    state,
+                    reason="periodic",
+                    force=False,
+                    best_effort=True,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("[bridge.live] context sync loop error guild=%s: %s", state.guild_id, exc)
+
+    def _schedule_context_snapshot(self, guild_id: int, *, reason: str, force: bool = False) -> None:
+        if not self._context_sync_enabled():
+            return
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+
+        def _run() -> None:
+            state = self._sessions.get(guild_id)
+            if state is None or state.stop_event.is_set():
+                return
+            asyncio.create_task(
+                self._publish_context_snapshot(state, reason=reason, force=force, best_effort=True),
+                name=f"lk-bridge-context-{guild_id}",
+            )
+
+        loop.call_soon_threadsafe(_run)
+
+    async def _handle_data_packet_received(self, guild_id: int, packet: Any) -> None:
+        state = self._sessions.get(guild_id)
+        if state is None or state.stop_event.is_set():
+            return
+        try:
+            topic = str(getattr(packet, "topic", "") or "").strip()
+            expected_topic = str(getattr(self.settings, "bridge_context_topic", "bridge-context") or "bridge-context")
+            if topic != expected_topic:
+                return
+            participant = getattr(packet, "participant", None)
+            participant_identity = str(getattr(participant, "identity", "") or "")
+            if participant_identity and participant_identity == state.identity:
+                # Ignore our own bridge-published packets if SDK echoes them back.
+                return
+            if not participant_identity:
+                state.agent_ctx_ack_invalid += 1
+                return
+            remote_participants = getattr(state.room, "remote_participants", {}) or {}
+            known_remote_identities: set[str] = set()
+            if isinstance(remote_participants, dict):
+                known_remote_identities = {
+                    str(getattr(p, "identity", "") or "")
+                    for p in remote_participants.values()
+                }
+                if known_remote_identities and participant_identity not in known_remote_identities:
+                    # Best-effort anti-spoof guard: require ack sender to exist among current remote participants.
+                    state.agent_ctx_ack_invalid += 1
+                    return
+            if state.agent_ctx_sender_identity and participant_identity != state.agent_ctx_sender_identity:
+                # Lock the ACK sender identity after the first accepted packet, but allow safe rebind if the old
+                # sender disappeared (agent restart/reconnect) or ACKs have been stale for a while.
+                old_sender_still_present = (
+                    state.agent_ctx_sender_identity in known_remote_identities if known_remote_identities else False
+                )
+                ack_age_sec = (
+                    (time.time() - float(state.agent_ctx_last_ack_unix))
+                    if float(state.agent_ctx_last_ack_unix or 0.0) > 0.0
+                    else None
+                )
+                if old_sender_still_present and (ack_age_sec is None or ack_age_sec < 20.0):
+                    state.agent_ctx_ack_invalid += 1
+                    return
+                logger.info(
+                    "[bridge.live] context ACK sender rebound guild=%s room=%s old=%s new=%s ack_age=%.1fs",
+                    guild_id,
+                    state.room_name,
+                    state.agent_ctx_sender_identity or "?",
+                    participant_identity or "?",
+                    float(ack_age_sec or 0.0),
+                )
+                state.agent_ctx_sender_identity = participant_identity
+            raw = getattr(packet, "data", b"")
+            if isinstance(raw, bytes):
+                if len(raw) <= 0 or len(raw) > 65536:
+                    state.agent_ctx_ack_invalid += 1
+                    return
+                payload_text = raw.decode("utf-8", errors="ignore")
+            else:
+                payload_text = str(raw or "")
+            if not payload_text:
+                state.agent_ctx_ack_invalid += 1
+                return
+            payload_obj = json.loads(payload_text)
+            if not isinstance(payload_obj, dict):
+                state.agent_ctx_ack_invalid += 1
+                return
+            event = str(payload_obj.get("event") or "")
+            if event != "agent_context_applied":
+                return
+            source_name = str(payload_obj.get("source") or "")
+            if source_name != "livekit-agent-runtime":
+                state.agent_ctx_ack_invalid += 1
+                return
+            packet_room_name = str(payload_obj.get("room_name") or "")
+            if packet_room_name and packet_room_name != state.room_name:
+                state.agent_ctx_ack_invalid += 1
+                return
+            if not state.agent_ctx_sender_identity:
+                state.agent_ctx_sender_identity = participant_identity
+            try:
+                state.agent_ctx_updates_received = max(
+                    int(state.agent_ctx_updates_received or 0),
+                    int(payload_obj.get("received", state.agent_ctx_updates_received) or 0),
+                )
+            except Exception:
+                pass
+            try:
+                state.agent_ctx_updates_applied = max(
+                    int(state.agent_ctx_updates_applied or 0),
+                    int(payload_obj.get("applied", state.agent_ctx_updates_applied) or 0),
+                )
+            except Exception:
+                pass
+            try:
+                state.agent_ctx_updates_ignored = max(
+                    int(state.agent_ctx_updates_ignored or 0),
+                    int(payload_obj.get("ignored", state.agent_ctx_updates_ignored) or 0),
+                )
+            except Exception:
+                pass
+            try:
+                state.agent_ctx_updates_errors = max(
+                    int(state.agent_ctx_updates_errors or 0),
+                    int(payload_obj.get("errors", state.agent_ctx_updates_errors) or 0),
+                )
+            except Exception:
+                pass
+            try:
+                seq = int(payload_obj.get("seq", 0) or 0)
+            except Exception:
+                seq = 0
+            if seq > 0:
+                state.agent_ctx_last_seq = seq
+            state.agent_ctx_last_reason = str(payload_obj.get("reason") or "")
+            state.agent_ctx_last_error = str(payload_obj.get("last_error") or "")
+            try:
+                state.agent_ctx_last_chars = int(payload_obj.get("chars", 0) or 0)
+            except Exception:
+                state.agent_ctx_last_chars = 0
+            try:
+                state.agent_ctx_last_ack_unix = float(payload_obj.get("applied_at_unix", time.time()) or time.time())
+            except Exception:
+                state.agent_ctx_last_ack_unix = time.time()
+            if state.health is not None:
+                state.health.mark_activity()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            state.agent_ctx_ack_invalid += 1
+            logger.debug("[bridge.live] data packet parse error guild=%s: %s", guild_id, exc)
+
     def _attach_room_event_handlers(self, room: Any, guild_id: int) -> None:
         def _on_connected() -> None:
             logger.info("[bridge.live] room connected guild=%s", guild_id)
             self._schedule_status_event(guild_id, "room_connected")
+            self._schedule_context_snapshot(guild_id, reason="room_connected", force=True)
 
         def _on_disconnected(reason: object) -> None:
             logger.info("[bridge.live] room disconnected guild=%s reason=%s", guild_id, reason)
@@ -515,6 +990,15 @@ class LiveKitDiscordBridgeManager:
         def _on_reconnected() -> None:
             logger.info("[bridge.live] room reconnected guild=%s", guild_id)
             self._schedule_status_event(guild_id, "room_reconnected")
+            self._schedule_context_snapshot(guild_id, reason="room_reconnected", force=True)
+
+        def _on_participant_connected(participant: Any) -> None:
+            del participant
+            self._schedule_context_snapshot(guild_id, reason="participant_connected")
+
+        def _on_participant_disconnected(participant: Any) -> None:
+            del participant
+            self._schedule_context_snapshot(guild_id, reason="participant_disconnected")
 
         def _on_track_subscribed(track: Any, publication: Any, participant: Any) -> None:
             loop = self._loop
@@ -547,6 +1031,17 @@ class LiveKitDiscordBridgeManager:
                 )
             )
 
+        def _on_data_received(packet: Any) -> None:
+            loop = self._loop
+            if loop is None or loop.is_closed():
+                return
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(
+                    self._handle_data_packet_received(guild_id, packet),
+                    name=f"lk-bridge-data-{guild_id}",
+                )
+            )
+
         room.on("connected", _on_connected)
         room.on("disconnected", _on_disconnected)
         room.on("reconnecting", _on_reconnecting)
@@ -554,6 +1049,9 @@ class LiveKitDiscordBridgeManager:
         room.on("track_subscribed", _on_track_subscribed)
         room.on("track_unsubscribed", _on_track_unsubscribed)
         room.on("transcription_received", _on_transcription_received)
+        room.on("data_received", _on_data_received)
+        room.on("participant_connected", _on_participant_connected)
+        room.on("participant_disconnected", _on_participant_disconnected)
 
     async def _attach_existing_remote_audio_tracks(self, state: _BridgeSessionState) -> None:
         participants = getattr(state.room, "remote_participants", {}) or {}
@@ -604,6 +1102,7 @@ class LiveKitDiscordBridgeManager:
             send_text=False,
             best_effort=True,
         )
+        self._schedule_context_snapshot(guild_id, reason="track_subscribed")
 
     async def _handle_transcription_received(self, guild_id: int, segments: Any, participant: Any) -> None:
         state = self._sessions.get(guild_id)
@@ -661,6 +1160,7 @@ class LiveKitDiscordBridgeManager:
         task = state.remote_tasks.pop(pub_sid, None)
         if task is not None:
             task.cancel()
+        self._schedule_context_snapshot(guild_id, reason="track_unsubscribed")
         self._schedule_status_event(
             guild_id,
             "assistant_audio_stream_unsubscribed",
@@ -687,6 +1187,7 @@ class LiveKitDiscordBridgeManager:
                         send_text=False,
                         best_effort=True,
                     )
+                    await self._publish_context_snapshot(state, reason="discord_audio_ingress_active", force=True, best_effort=True)
                 if state.health is not None:
                     state.health.mark_activity()
             except asyncio.CancelledError:

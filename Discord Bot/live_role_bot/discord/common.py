@@ -142,9 +142,11 @@ class PendingProfileUpdate:
     user_id: str
     message_id: int
     user_text: str
+    user_label: str = ""
     modality: str = "text"
     source: str = "unknown"
     quality: float = 1.0
+    persona_ingest_enqueued: bool = False
 
 
 @dataclass(slots=True)

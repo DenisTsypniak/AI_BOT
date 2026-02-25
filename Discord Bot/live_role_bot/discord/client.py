@@ -11,6 +11,7 @@ import discord
 from ..config import Settings
 from ..memory.extractor import MemoryExtractor
 from ..memory.store import MemoryStore
+from ..persona import PersonaGrowthEngine
 from ..services.gemini_client import GeminiClient
 from ..services.livekit.bridge import LiveKitDiscordBridgeManager
 from ..services.livekit.config import LiveKitAgentSettings
@@ -63,6 +64,12 @@ class LiveRoleDiscordBot(
         self.memory_extractor = memory_extractor
         self.local_stt = local_stt
         self.rp_canon_prompt = self._load_bot_history_prompt()
+        self.persona_engine = PersonaGrowthEngine(
+            settings=settings,
+            memory=memory,
+            core_dna_path=settings.bot_history_json_path,
+            llm=llm,
+        )
 
         self.plugin_manager: PluginManager | None = None
         if self.settings.plugins_enabled and PluginManager is not None:
@@ -73,13 +80,19 @@ class LiveRoleDiscordBot(
         self.channel_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
         self.profile_queue: asyncio.Queue[PendingProfileUpdate] = asyncio.Queue(maxsize=260)
+        self.persona_event_queue: asyncio.Queue[PendingProfileUpdate] = asyncio.Queue(
+            maxsize=max(20, int(getattr(settings, "persona_event_queue_maxsize", 260)))
+        )
         self.summary_queue: asyncio.Queue[PendingSummaryUpdate] = asyncio.Queue(maxsize=220)
         self.voice_turn_queue: asyncio.Queue[PendingVoiceTurn] = asyncio.Queue(maxsize=140)
 
         self.profile_worker_task: asyncio.Task[None] | None = None
+        self.persona_ingest_task: asyncio.Task[None] | None = None
         self.summary_worker_task: asyncio.Task[None] | None = None
         self.voice_worker_task: asyncio.Task[None] | None = None
         self.voice_flush_task: asyncio.Task[None] | None = None
+        self.persona_reflection_task: asyncio.Task[None] | None = None
+        self.persona_decay_task: asyncio.Task[None] | None = None
 
         self.summary_pending_keys: set[tuple[str, str, str]] = set()
         self.voice_buffers: dict[tuple[int, int], VoiceTurnBuffer] = {}
@@ -113,8 +126,9 @@ class LiveRoleDiscordBot(
                 except Exception as exc:
                     logger.error("Failed to initialize LiveKit bridge manager: %s", exc)
         self.local_voice_fallback_enabled = self.settings.local_stt_enabled and not self.settings.gemini_native_audio_enabled
+        local_stt_runtime_enabled = bool(getattr(self.local_stt, "enabled", False))
         self.bridge_voice_memory_transcript_enabled = bool(
-            self.settings.local_stt_enabled
+            local_stt_runtime_enabled
             and self.settings.memory_enabled
             and self.settings.voice_bridge_memory_stt_enabled
             and self.livekit_bridge is not None
@@ -145,6 +159,7 @@ class LiveRoleDiscordBot(
         await self.memory.init()
         await self.llm.start()
         await self.memory_extractor.start()
+        await self.persona_engine.start()
 
         if self.plugin_manager is not None:
             self.plugin_manager.load_plugins()
@@ -158,7 +173,22 @@ class LiveRoleDiscordBot(
         )
 
         self.profile_worker_task = asyncio.create_task(self._profile_worker(), name="profile-worker")
+        if bool(getattr(self.settings, "persona_queue_isolation_enabled", False)) and bool(
+            getattr(self.persona_engine, "enabled", False)
+        ):
+            self.persona_ingest_task = asyncio.create_task(
+                self._persona_ingest_worker(),
+                name="persona-ingest-worker",
+            )
         self.summary_worker_task = asyncio.create_task(self._summary_worker(), name="summary-worker")
+        self.persona_reflection_task = asyncio.create_task(
+            self._persona_reflection_loop(),
+            name="persona-reflection-worker",
+        )
+        self.persona_decay_task = asyncio.create_task(
+            self._persona_decay_loop(),
+            name="persona-decay-worker",
+        )
         if self.local_voice_ingest_enabled:
             self.voice_worker_task = asyncio.create_task(self._voice_worker(), name="voice-worker")
             self.voice_flush_task = asyncio.create_task(self._voice_flush_loop(), name="voice-flush")
@@ -171,10 +201,14 @@ class LiveRoleDiscordBot(
             await self._run_shutdown_step("native_audio.shutdown_all", self.native_audio.shutdown_all(), timeout=3.0)
 
         await self._cancel_task(self.profile_worker_task)
+        await self._cancel_task(self.persona_ingest_task)
         await self._cancel_task(self.summary_worker_task)
         await self._cancel_task(self.voice_worker_task)
         await self._cancel_task(self.voice_flush_task)
+        await self._cancel_task(self.persona_reflection_task)
+        await self._cancel_task(self.persona_decay_task)
 
+        await self._run_shutdown_step("persona_engine.close", self.persona_engine.close(), timeout=6.0)
         await self._run_shutdown_step("memory_extractor.close", self.memory_extractor.close(), timeout=6.0)
         await self._run_shutdown_step("llm.close", self.llm.close(), timeout=6.0)
         memory_close = getattr(self.memory, "close", None)
@@ -227,14 +261,18 @@ class LiveRoleDiscordBot(
             "memory_ping_error": "",
             "queues": {
                 "profile": int(self.profile_queue.qsize()),
+                "persona_event": int(self.persona_event_queue.qsize()),
                 "summary": int(self.summary_queue.qsize()),
                 "voice_turn": int(self.voice_turn_queue.qsize()),
             },
             "workers": {
                 "profile": self._task_alive(self.profile_worker_task),
+                "persona_ingest": self._task_alive(self.persona_ingest_task),
                 "summary": self._task_alive(self.summary_worker_task),
                 "voice": self._task_alive(self.voice_worker_task),
                 "voice_flush": self._task_alive(self.voice_flush_task),
+                "persona_reflection": self._task_alive(self.persona_reflection_task),
+                "persona_decay": self._task_alive(self.persona_decay_task),
             },
             "voice_clients": [],
             "livekit_bridge": {"enabled": False},
@@ -248,6 +286,13 @@ class LiveRoleDiscordBot(
                 "bridge_memory_stt_enabled": bool(self.bridge_voice_memory_transcript_enabled),
                 "worker_enabled": bool(self.local_voice_ingest_enabled),
             },
+            "voice_memory_diag": (
+                self._voice_memory_diag_snapshot() if callable(getattr(self, "_voice_memory_diag_snapshot", None)) else {}
+            ),
+            "persona_queue_diag": (
+                self._persona_queue_diag_snapshot() if callable(getattr(self, "_persona_queue_diag_snapshot", None)) else {}
+            ),
+            "persona_growth": self.persona_engine.status_snapshot(),
         }
 
         ping_fn = getattr(self.memory, "ping", None)

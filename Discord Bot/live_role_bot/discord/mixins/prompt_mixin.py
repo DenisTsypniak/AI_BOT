@@ -124,6 +124,19 @@ class PromptMixin:
                 lines.append(KNOWN_PARTICIPANT_MEMORY_HEADER)
                 lines.extend(profile_lines)
 
+        persona_engine = getattr(self, "persona_engine", None)
+        if persona_engine is not None:
+            with contextlib.suppress(Exception):
+                overlay = await persona_engine.build_prompt_overlay(
+                    mode="voice",
+                    guild_id=guild_key,
+                    channel_id=str(getattr(voice_channel, "id", "voice")),
+                    user_id="*",
+                    query_text="",
+                )
+                if overlay:
+                    lines.append(overlay)
+
         return "\n".join(line for line in lines if line)
 
     async def _build_context_packet(
@@ -178,6 +191,18 @@ class PromptMixin:
             system_parts.append(build_user_dialogue_summary_line(summary_text))
         if facts:
             system_parts.append(build_relevant_facts_section(facts))
+        persona_engine = getattr(self, "persona_engine", None)
+        if persona_engine is not None:
+            with contextlib.suppress(Exception):
+                overlay = await persona_engine.build_prompt_overlay(
+                    mode="text",
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                    user_id=user_id,
+                    query_text=user_text,
+                )
+                if overlay:
+                    system_parts.append(overlay)
 
         messages: list[dict[str, str]] = [
             {"role": "system", "content": "\n\n".join(part for part in system_parts if part)}

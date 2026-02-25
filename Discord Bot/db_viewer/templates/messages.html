@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+
+{% block title %}Повідомлення - Live Role Bot{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1 class="page-title">Повідомлення Сесій</h1>
+    <p class="page-description">Хронологічний журнал взаємодії бота та користувачів.</p>
+</div>
+<style>
+    .role-badge-system {
+        background-color: var(--warning);
+        color: #fff;
+    }
+
+    .role-badge-assistant {
+        background-color: var(--success);
+        color: #1a1a1a;
+        font-weight: 500;
+    }
+
+    .role-badge-user {
+        background-color: var(--accent);
+        color: #fff;
+    }
+</style>
+
+<div class="card" style="margin-bottom: 20px; padding: 15px;">
+    <form method="GET" action="/messages" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;">
+        <div style="flex: 1; min-width: 150px; padding-right: 5px;">
+            <label for="q"
+                style="display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px;">Пошук тексту
+                (q)</label>
+            <input type="text" id="q" name="q" value="{{ filters.get('q', '') or '' }}"
+                placeholder="Текст повідомлення..."
+                style="box-sizing: border-box; width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border-color); background-color: var(--background-color); color: var(--text-main);">
+        </div>
+        <div style="width: 140px; padding-right: 5px;">
+            <label for="guild_id"
+                style="display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px;">Guild
+                ID</label>
+            <input type="text" id="guild_id" name="guild_id" value="{{ filters.get('guild_id', '') or '' }}"
+                style="box-sizing: border-box; width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border-color); background-color: var(--background-color); color: var(--text-main);">
+        </div>
+        <div style="width: 140px; padding-right: 5px;">
+            <label for="user_id"
+                style="display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px;">User ID</label>
+            <input type="text" id="user_id" name="user_id" value="{{ filters.get('user_id', '') or '' }}"
+                style="box-sizing: border-box; width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border-color); background-color: var(--background-color); color: var(--text-main);">
+        </div>
+        <div style="width: 100px; padding-right: 5px;">
+            <label for="role"
+                style="display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px;">Роль</label>
+            <select id="role" name="role"
+                style="box-sizing: border-box; width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border-color); background-color: var(--background-color); color: var(--text-main);">
+                <option value="">Всі</option>
+                <option value="user" {% if filters.get('role')=='user' %}selected{% endif %}>Користувач</option>
+                <option value="assistant" {% if filters.get('role')=='assistant' %}selected{% endif %}>Бот</option>
+                <option value="system" {% if filters.get('role')=='system' %}selected{% endif %}>Система</option>
+            </select>
+        </div>
+        <div style="width: 110px; padding-right: 5px;">
+            <label for="modality"
+                style="display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px;">Модальність</label>
+            <select id="modality" name="modality"
+                style="box-sizing: border-box; width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border-color); background-color: var(--background-color); color: var(--text-main);">
+                <option value="">Всі</option>
+                <option value="text" {% if filters.get('modality')=='text' %}selected{% endif %}>Текст</option>
+                <option value="voice" {% if filters.get('modality')=='voice' %}selected{% endif %}>Голос</option>
+            </select>
+        </div>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+            <button type="submit" class="btn primary" style="padding: 8px 16px;">Фільтрувати</button>
+            <a href="/messages" class="btn" style="padding: 8px 16px;">Скинути</a>
+
+            {% set filter_params = "" %}
+            {% for k, v in filters.items() %}
+            {% if v %}
+            {% set filter_params = filter_params ~ "&" ~ k ~ "=" ~ v|urlencode %}
+            {% endif %}
+            {% endfor %}
+            <a href="/messages/csv?{{ filter_params }}" class="btn primary" style="padding: 8px 16px;">Export CSV</a>
+            <button type="button" class="btn primary"
+                onclick="navigator.clipboard.writeText(window.location.href); this.innerText='Скопійовано!';"
+                style="padding: 8px 16px;">📋 Копіювати URL Фільтру</button>
+        </div>
+    </form>
+</div>
+
+<div class="table-container">
+    <h2 style="margin: 15px 15px 10px 15px; font-size: 1.2rem;">Рядки {{ offset + 1 }} - {{ offset + messages|length }}
+    </h2>
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 60px;">ID</th>
+                <th style="width: 150px;">Час</th>
+                <th style="width: 150px;">Автор ID</th>
+                <th style="width: 80px;">Роль</th>
+                <th style="width: 100px;">Модальність</th>
+                <th>Текст</th>
+                <th>Дії</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for msg in messages %}
+            <tr>
+                <td>{{ msg.message_id }}</td>
+                <td style="color: var(--text-muted); font-size: 0.85rem;" title="{{ msg.created_at }}">{{
+                    msg.created_at|kyiv_time }}</td>
+                <td style="font-family: monospace;">{{ msg.user_id }}</td>
+                <td>
+                    {% set role_class = 'role-badge-system' if msg.role == 'system' else ('role-badge-assistant' if
+                    msg.role == 'assistant' else 'role-badge-user') %}
+                    <span class="badge {{ role_class }}">{{ msg.role }}</span>
+                </td>
+                <td>
+                    <span class="badge"
+                        style="background-color: var(--surface-color); border: 1px solid var(--border-color);">
+                        {{ '🎤 Голос' if 'voice' in msg.modality else '📝 Текст' }}
+                    </span>
+                </td>
+                <td class="text-wrap">
+                    <div
+                        class="msg-content {% if msg.role == 'assistant' %}msg-assistant{% else %}msg-other{% endif %}">
+                        {{ msg.content_clean }}</div>
+
+                    {% if msg.transcript %}
+                    <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border-color);">
+                        <div
+                            style="font-size: 0.75rem; text-transform: uppercase; color: var(--warning); margin-bottom: 4px;">
+                            🎙️ STT Розшифровка (Впевн.: {{"%.2f"|format(msg.confidence)}})</div>
+                        <div style="font-style: italic; color: var(--text-muted);">"{{ msg.transcript }}"</div>
+                    </div>
+                    {% endif %}
+                </td>
+                <td>
+                    <a href="/messages/{{ msg.message_id }}" class="btn primary"
+                        style="padding: 4px 10px; font-size: 0.85rem;">Дет.</a>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="7" style="text-align: center; padding: 30px; color: var(--text-muted);">Повідомлень не
+                    знайдено.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="pagination">
+    {% set prev_offset = offset - limit %}
+    {% set next_offset = offset + limit %}
+
+    {% set filter_params = "" %}
+    {% for k, v in filters.items() %}
+    {% if v %}
+    {% set filter_params = filter_params ~ "&" ~ k ~ "=" ~ v|urlencode %}
+    {% endif %}
+    {% endfor %}
+
+    {% if offset > 0 %}
+    <a href="/messages?limit={{ limit }}&offset={{ prev_offset }}{{ filter_params }}" class="btn">Новіші</a>
+    {% else %}
+    <button class="btn" disabled style="opacity: 0.5; cursor: not-allowed;">Новіші</button>
+    {% endif %}
+
+    {% if messages|length == limit %}
+    <a href="/messages?limit={{ limit }}&offset={{ next_offset }}{{ filter_params }}" class="btn">Старіші</a>
+    {% else %}
+    <button class="btn" disabled style="opacity: 0.5; cursor: not-allowed;">Старіші</button>
+    {% endif %}
+</div>
+{% endblock %}

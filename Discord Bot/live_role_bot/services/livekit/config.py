@@ -47,6 +47,12 @@ class LiveKitAgentSettings:
     health_log_interval_seconds: int
     bridge_enabled: bool
     bridge_control_channel: str
+    bridge_context_sync_enabled: bool
+    bridge_context_topic: str
+    bridge_context_min_interval_ms: int
+    bridge_context_force_interval_seconds: int
+    agent_runtime_context_injection_enabled: bool
+    agent_runtime_context_max_chars: int
     bot_history_json_path: Path
 
     @classmethod
@@ -73,6 +79,12 @@ class LiveKitAgentSettings:
             health_log_interval_seconds=_env_int("LIVEKIT_HEALTH_LOG_INTERVAL_SECONDS", 30),
             bridge_enabled=_env_bool("LIVEKIT_BRIDGE_ENABLED", False),
             bridge_control_channel=_env_str("LIVEKIT_BRIDGE_CONTROL_CHANNEL", "bridge-control"),
+            bridge_context_sync_enabled=_env_bool("LIVEKIT_BRIDGE_CONTEXT_SYNC_ENABLED", True),
+            bridge_context_topic=_env_str("LIVEKIT_BRIDGE_CONTEXT_TOPIC", "bridge-context"),
+            bridge_context_min_interval_ms=_env_int("LIVEKIT_BRIDGE_CONTEXT_MIN_INTERVAL_MS", 1200),
+            bridge_context_force_interval_seconds=_env_int("LIVEKIT_BRIDGE_CONTEXT_FORCE_INTERVAL_SECONDS", 12),
+            agent_runtime_context_injection_enabled=_env_bool("LIVEKIT_AGENT_CONTEXT_INJECTION_ENABLED", True),
+            agent_runtime_context_max_chars=_env_int("LIVEKIT_AGENT_CONTEXT_MAX_CHARS", 420),
             bot_history_json_path=Path(
                 _env_str("LIVEKIT_BOT_HISTORY_JSON_PATH", str(base_settings.bot_history_json_path))
             ).expanduser(),
@@ -95,6 +107,12 @@ class LiveKitAgentSettings:
             raise ValueError("LIVEKIT_HEALTH_LOG_INTERVAL_SECONDS must be >= 5")
         if self.temperature < 0.0 or self.temperature > 2.0:
             raise ValueError("LIVEKIT_GOOGLE_TEMPERATURE must be in [0, 2]")
+        if self.bridge_context_min_interval_ms < 100 or self.bridge_context_min_interval_ms > 60000:
+            raise ValueError("LIVEKIT_BRIDGE_CONTEXT_MIN_INTERVAL_MS must be in [100, 60000]")
+        if self.bridge_context_force_interval_seconds < 1 or self.bridge_context_force_interval_seconds > 300:
+            raise ValueError("LIVEKIT_BRIDGE_CONTEXT_FORCE_INTERVAL_SECONDS must be in [1, 300]")
+        if self.agent_runtime_context_max_chars < 120 or self.agent_runtime_context_max_chars > 1200:
+            raise ValueError("LIVEKIT_AGENT_CONTEXT_MAX_CHARS must be in [120, 1200]")
 
     def validate_bridge(self) -> None:
         if not self.bridge_enabled:
@@ -109,6 +127,10 @@ class LiveKitAgentSettings:
             raise ValueError("LIVEKIT_ROOM_PREFIX cannot be empty for bridge")
         if self.health_log_interval_seconds < 5:
             raise ValueError("LIVEKIT_HEALTH_LOG_INTERVAL_SECONDS must be >= 5")
+        if not self.bridge_control_channel.strip():
+            raise ValueError("LIVEKIT_BRIDGE_CONTROL_CHANNEL cannot be empty")
+        if not self.bridge_context_topic.strip():
+            raise ValueError("LIVEKIT_BRIDGE_CONTEXT_TOPIC cannot be empty")
 
     def export_env(self) -> None:
         os.environ["LIVEKIT_URL"] = self.url

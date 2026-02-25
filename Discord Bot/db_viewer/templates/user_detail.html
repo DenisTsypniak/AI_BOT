@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+
+{% block title %}Користувач {{ data.user.discord_username or user_id }} - Live Role Bot{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <h1 class="page-title">{{ data.user.discord_username or 'Невідомий користувач' }} <span
+                    style="font-size: 1rem; color: var(--text-muted);">({{ data.user.combined_label }})</span></h1>
+            <p class="page-description">Guild ID: {{ guild_id }} | User ID: {{ user_id }}</p>
+        </div>
+        <a href="/users" class="btn">← Назад до списку</a>
+    </div>
+</div>
+
+<div class="stats-grid" style="margin-bottom: 30px;">
+    <div class="stat-card">
+        <h3>Вперше побачений</h3>
+        <p style="font-size: 1.2rem; color: var(--accent);">{{ data.user.first_seen|kyiv_time }}</p>
+    </div>
+    <div class="stat-card">
+        <h3>Останнє оновлення</h3>
+        <p style="font-size: 1.2rem; color: var(--accent);">{{ data.user.updated_at|kyiv_time }}</p>
+    </div>
+    <div class="stat-card">
+        <h3>Кількість фактів</h3>
+        <p style="font-size: 1.5rem; color: var(--success); font-weight: bold;">{{ data.facts|length }}</p>
+    </div>
+</div>
+
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+    <div class="card">
+        <h2>Відомі Факти</h2>
+        <div class="table-container" style="max-height: 400px; overflow-y: auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Ключ</th>
+                        <th>Значення</th>
+                        <th>Важливість</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for fact in data.facts %}
+                    <tr>
+                        <td style="font-family: monospace;">{{ fact.fact_key }}</td>
+                        <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;"
+                            title="{{ fact.fact_value }}">{{ fact.fact_value }}</td>
+                        <td>{{ fact.importance }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="3" style="text-align: center; color: var(--text-muted);">Жодного факту не знайдено.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Останні Повідомлення</h2>
+        <div class="table-container" style="max-height: 400px; overflow-y: auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Час</th>
+                        <th>Роль</th>
+                        <th>Текст</th>
+                        <th>Дії</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for msg in data.messages %}
+                    <tr>
+                        <td style="font-size: 0.85rem; color: var(--text-muted);">{{ msg.created_at|kyiv_time('%Y-%m-%d
+                            %H:%M:%S') }}</td>
+                        <td>
+                            <span
+                                class="badge {% if msg.role == 'user' %}primary{% elif msg.role == 'assistant' %}accent{% else %}warning{% endif %}">
+                                {{ msg.role }}
+                            </span>
+                        </td>
+                        <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
+                            title="{{ msg.content_clean }}">{{ msg.content_clean }}</td>
+                        <td><a href="/messages/{{ msg.message_id }}" class="btn"
+                                style="padding: 4px 8px; font-size: 0.8rem;">Дет.</a></td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="4" style="text-align: center; color: var(--text-muted);">Жодного повідомлення не
+                            знайдено.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

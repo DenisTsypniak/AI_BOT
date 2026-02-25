@@ -140,7 +140,16 @@ def build_bot(settings: Settings) -> LiveRoleDiscordBot:
         max_output_tokens=settings.gemini_max_output_tokens,
         base_url=settings.gemini_base_url,
     )
-    local_stt_enabled = settings.local_stt_enabled and not settings.gemini_native_audio_enabled
+    # Keep local STT available for bridge-memory transcription even when Gemini Native Audio is enabled.
+    # Native Audio disables only the local voice reply fallback path, not the per-user voice memory ingest path.
+    bridge_enabled_hint = str(os.getenv("LIVEKIT_BRIDGE_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
+    bridge_memory_stt_runtime = bool(
+        settings.local_stt_enabled
+        and settings.memory_enabled
+        and settings.voice_bridge_memory_stt_enabled
+        and bridge_enabled_hint
+    )
+    local_stt_enabled = bool(settings.local_stt_enabled and (not settings.gemini_native_audio_enabled or bridge_memory_stt_runtime))
     local_stt = LocalSTT(
         enabled=local_stt_enabled,
         model=settings.local_stt_model,

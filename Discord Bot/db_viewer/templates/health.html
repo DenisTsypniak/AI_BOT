@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}Здоров'я Системи - Live Role Bot{% endblock %}
+
+{% block content %}
+<style>
+    .status-connected-border {
+        border-left: 4px solid var(--success) !important;
+    }
+
+    .status-disconnected-border {
+        border-left: 4px solid var(--red) !important;
+    }
+
+    .status-connected-text {
+        color: var(--success) !important;
+    }
+
+    .status-disconnected-text {
+        color: var(--red) !important;
+    }
+</style>
+
+<div class="page-header">
+    <h1 class="page-title">Стан Системи (Health)</h1>
+    <p class="page-description">Діагностика з'єднання з базою даних та пулу.</p>
+</div>
+
+<div class="stats-grid">
+    {% set border_class = 'status-connected-border' if db_status == 'Connected' else 'status-disconnected-border' %}
+    {% set text_class = 'status-connected-text' if db_status == 'Connected' else 'status-disconnected-text' %}
+
+    <div class="stat-card {{ border_class }}">
+        <h3 style="margin-top: 0; color: var(--text-main);">Статус БД</h3>
+        <p class="{{ text_class }}" style="font-size: 1.5rem; font-weight: bold; margin-bottom: 0;">
+            {{ db_status }}</p>
+    </div>
+
+    <div class="stat-card">
+        <h3 style="margin-top: 0; color: var(--text-main);">Пінг (Затримка)</h3>
+        <p style="font-size: 1.5rem; font-weight: bold; margin-bottom: 0; color: var(--accent);">
+            {{"%.2f"|format(ping_ms)}} ms</p>
+    </div>
+
+    <div class="stat-card">
+        <h3 style="margin-top: 0; color: var(--text-main);">Пул З'єднань</h3>
+        <p style="font-size: 1.1rem; margin-bottom: 0; color: var(--text-main);">
+            Усього: <strong>{{ pool_size }}</strong><br>
+            Вільних: <strong style="color: var(--success);">{{ idle_size }}</strong>
+        </p>
+    </div>
+</div>
+{% endblock %}

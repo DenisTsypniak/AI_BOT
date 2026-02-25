@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}Схема БД - Live Role Bot{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1 class="page-title">Схема Бази Даних</h1>
+    <p class="page-description">Перелік усіх таблиць у публічній схемі бази даних.</p>
+</div>
+
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Назва таблиці</th>
+                <th style="text-align: right;">Кількість рядків</th>
+                <th style="text-align: center; width: 100px;">Дії</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for table in tables %}
+            <tr>
+                <td style="font-family: monospace; font-size: 1.1rem; color: var(--accent);">{{ table.name }}</td>
+                <td style="text-align: right; font-family: monospace;">
+                    {% if table.count >= 0 %}
+                    {{ table.count }}
+                    {% else %}
+                    <span style="color: var(--warning);">Помилка</span>
+                    {% endif %}
+                </td>
+                <td style="text-align: center;">
+                    <a href="/schema/{{ table.name }}" class="btn primary"
+                        style="padding: 4px 10px; font-size: 0.8rem;">Переглянути</a>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="3" style="text-align: center; padding: 30px; color: var(--text-muted);">Таблиць не
+                    знайдено.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

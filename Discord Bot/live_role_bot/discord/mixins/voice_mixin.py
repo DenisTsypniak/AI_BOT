@@ -238,6 +238,15 @@ class VoiceMixin:
         transcript_source: str = "local_stt",
     ) -> None:
         if not pcm_48k_stereo:
+            if callable(getattr(self, "_record_voice_memory_diag", None)):
+                self._record_voice_memory_diag(
+                    stage="voice_pcm_ingest",
+                    outcome="drop",
+                    reason="empty_pcm",
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    source=transcript_source,
+                )
             return
 
         now = time.monotonic()
@@ -270,16 +279,44 @@ class VoiceMixin:
     def _finalize_voice_turn(self, key: tuple[int, int]) -> None:
         state = self.voice_buffers.pop(key, None)
         if state is None or not state.data:
+            if callable(getattr(self, "_record_voice_memory_diag", None)):
+                self._record_voice_memory_diag(
+                    stage="voice_turn_finalize",
+                    outcome="drop",
+                    reason="empty_buffer",
+                    guild_id=key[0],
+                    user_id=key[1],
+                )
             return
 
         pcm = bytes(state.data)
         duration_ms = int((len(pcm) / (48000 * 4)) * 1000)
         if duration_ms < self.settings.voice_min_turn_ms:
+            if callable(getattr(self, "_record_voice_memory_diag", None)):
+                self._record_voice_memory_diag(
+                    stage="voice_turn_finalize",
+                    outcome="drop",
+                    reason="too_short",
+                    guild_id=key[0],
+                    user_id=key[1],
+                    duration_ms=duration_ms,
+                    min_turn_ms=self.settings.voice_min_turn_ms,
+                )
             return
 
         guild_id, user_id = key
         channel_id = self.voice_text_channels.get(guild_id)
         if channel_id is None:
+            if callable(getattr(self, "_record_voice_memory_diag", None)):
+                self._record_voice_memory_diag(
+                    stage="voice_turn_finalize",
+                    outcome="drop",
+                    reason="no_voice_text_channel_binding",
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    duration_ms=duration_ms,
+                    source=state.transcript_source or "local_stt",
+                )
             return
 
         item = PendingVoiceTurn(
@@ -293,12 +330,43 @@ class VoiceMixin:
         )
 
         if self.voice_turn_queue.full():
+            if callable(getattr(self, "_record_voice_memory_diag", None)):
+                self._record_voice_memory_diag(
+                    stage="voice_turn_queue",
+                    outcome="drop",
+                    reason="queue_full_drop_oldest",
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    source=state.transcript_source or "local_stt",
+                )
             with contextlib.suppress(asyncio.QueueEmpty):
                 self.voice_turn_queue.get_nowait()
                 self.voice_turn_queue.task_done()
 
-        with contextlib.suppress(asyncio.QueueFull):
+        try:
             self.voice_turn_queue.put_nowait(item)
+            if callable(getattr(self, "_record_voice_memory_diag", None)):
+                self._record_voice_memory_diag(
+                    stage="voice_turn_queue",
+                    outcome="queued",
+                    reason="ok",
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    source=state.transcript_source or "local_stt",
+                    duration_ms=duration_ms,
+                    reply_enabled=bool(state.reply_enabled),
+                )
+        except asyncio.QueueFull:
+            if callable(getattr(self, "_record_voice_memory_diag", None)):
+                self._record_voice_memory_diag(
+                    stage="voice_turn_queue",
+                    outcome="drop",
+                    reason="queue_full_put_failed",
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    source=state.transcript_source or "local_stt",
+                )
 
     async def _voice_flush_loop(self) -> None:
         while True:
@@ -322,20 +390,95 @@ class VoiceMixin:
             try:
                 result = await self.local_stt.transcribe(item.pcm_48k_stereo)
                 transcript = collapse_spaces(result.text)
-                await self.memory.save_stt_turn(
-                    guild_id=str(item.guild_id),
-                    channel_id=str(item.channel_id),
-                    user_id=str(item.user_id),
-                    duration_ms=result.duration_ms,
-                    rms=result.rms,
-                    transcript=transcript or None,
-                    confidence=result.confidence,
-                    model_name=result.model_name,
-                    status=result.status,
-                    message_id=None,
-                )
+                try:
+                    await self.memory.save_stt_turn(
+                        guild_id=str(item.guild_id),
+                        channel_id=str(item.channel_id),
+                        user_id=str(item.user_id),
+                        duration_ms=result.duration_ms,
+                        rms=result.rms,
+                        transcript=transcript or None,
+                        confidence=result.confidence,
+                        model_name=result.model_name,
+                        status=result.status,
+                        message_id=None,
+                    )
+                    if callable(getattr(self, "_record_voice_memory_diag", None)):
+                        self._record_voice_memory_diag(
+                            stage="voice_stt",
+                            outcome="save_stt_turn",
+                            reason="ok",
+                            guild_id=item.guild_id,
+                            channel_id=item.channel_id,
+                            user_id=item.user_id,
+                            source=item.transcript_source or "local_stt",
+                            confidence=f"{float(result.confidence):.3f}",
+                            status=result.status,
+                        )
+                except Exception as exc:
+                    if callable(getattr(self, "_record_voice_memory_diag", None)):
+                        self._record_voice_memory_diag(
+                            stage="voice_stt",
+                            outcome="error",
+                            reason="save_stt_turn_failed",
+                            guild_id=item.guild_id,
+                            channel_id=item.channel_id,
+                            user_id=item.user_id,
+                            source=item.transcript_source or "local_stt",
+                            error=exc,
+                        )
+                    raise
 
-                if not transcript or result.confidence < self.settings.transcription_min_confidence:
+                if not transcript:
+                    if callable(getattr(self, "_record_voice_memory_diag", None)):
+                        if result.status == "empty":
+                            self._record_voice_memory_diag(
+                                stage="voice_stt",
+                                outcome="drop",
+                                reason="empty_transcript",
+                                guild_id=item.guild_id,
+                                channel_id=item.channel_id,
+                                user_id=item.user_id,
+                                source=item.transcript_source or "local_stt",
+                                status=result.status,
+                            )
+                        elif result.status in {"error", "model_unavailable"}:
+                            self._record_voice_memory_diag(
+                                stage="voice_stt",
+                                outcome="error",
+                                reason=f"transcribe_{result.status}",
+                                guild_id=item.guild_id,
+                                channel_id=item.channel_id,
+                                user_id=item.user_id,
+                                source=item.transcript_source or "local_stt",
+                                status=result.status,
+                                model_name=result.model_name,
+                            )
+                        else:
+                            self._record_voice_memory_diag(
+                                stage="voice_stt",
+                                outcome="drop",
+                                reason=f"no_transcript_status_{result.status or 'unknown'}",
+                                guild_id=item.guild_id,
+                                channel_id=item.channel_id,
+                                user_id=item.user_id,
+                                source=item.transcript_source or "local_stt",
+                                status=result.status,
+                            )
+                    continue
+                if result.confidence < self.settings.transcription_min_confidence:
+                    if callable(getattr(self, "_record_voice_memory_diag", None)):
+                        self._record_voice_memory_diag(
+                            stage="voice_stt",
+                            outcome="drop",
+                            reason="low_confidence",
+                            guild_id=item.guild_id,
+                            channel_id=item.channel_id,
+                            user_id=item.user_id,
+                            source=item.transcript_source or "local_stt",
+                            confidence=f"{float(result.confidence):.3f}",
+                            threshold=f"{float(self.settings.transcription_min_confidence):.3f}",
+                        )
                     continue
 
                 guild = self.get_guild(item.guild_id)
@@ -346,15 +489,29 @@ class VoiceMixin:
                             item.user_label = await self._sync_member_identity(item.guild_id, member)
 
                 if not item.reply_enabled:
-                    await self._save_native_user_transcript(
-                        guild_id=item.guild_id,
-                        channel_id=item.channel_id,
-                        user_id=item.user_id,
-                        user_label=item.user_label,
-                        text=transcript,
-                        source=item.transcript_source or "bridge_local_stt",
-                        quality=result.confidence,
-                    )
+                    try:
+                        await self._save_native_user_transcript(
+                            guild_id=item.guild_id,
+                            channel_id=item.channel_id,
+                            user_id=item.user_id,
+                            user_label=item.user_label,
+                            text=transcript,
+                            source=item.transcript_source or "bridge_local_stt",
+                            quality=result.confidence,
+                        )
+                    except Exception as exc:
+                        if callable(getattr(self, "_record_voice_memory_diag", None)):
+                            self._record_voice_memory_diag(
+                                stage="voice_stt",
+                                outcome="error",
+                                reason="save_native_user_transcript_failed",
+                                guild_id=item.guild_id,
+                                channel_id=item.channel_id,
+                                user_id=item.user_id,
+                                source=item.transcript_source or "bridge_local_stt",
+                                error=exc,
+                            )
+                        raise
                     continue
 
                 reply = await self._run_dialogue_turn(

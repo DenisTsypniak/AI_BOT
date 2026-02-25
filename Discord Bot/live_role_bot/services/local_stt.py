@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import tempfile
 import wave
 from dataclasses import dataclass
@@ -12,6 +13,9 @@ try:
     import audioop
 except ModuleNotFoundError:
     import audioop_lts as audioop  # type: ignore[import-not-found]
+
+
+logger = logging.getLogger("live_role_bot")
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -62,6 +66,7 @@ class LocalSTT:
             from faster_whisper import WhisperModel  # type: ignore
         except Exception:
             self._load_failed = True
+            logger.exception("Local STT failed to import faster_whisper")
             return None
 
         try:
@@ -72,6 +77,12 @@ class LocalSTT:
             )
         except Exception:
             self._load_failed = True
+            logger.exception(
+                "Local STT failed to load primary model model=%s device=%s compute=%s",
+                self.model_name,
+                self.device,
+                self.compute_type,
+            )
             return None
 
         return self._model
@@ -88,6 +99,7 @@ class LocalSTT:
             from faster_whisper import WhisperModel  # type: ignore
         except Exception:
             self._fallback_load_failed = True
+            logger.exception("Local STT failed to import faster_whisper for fallback model")
             return None
 
         try:
@@ -98,6 +110,12 @@ class LocalSTT:
             )
         except Exception:
             self._fallback_load_failed = True
+            logger.exception(
+                "Local STT failed to load fallback model model=%s device=%s compute=%s",
+                self.fallback_model_name,
+                self.device,
+                self.compute_type,
+            )
             return None
 
         return self._fallback_model
@@ -269,6 +287,12 @@ class LocalSTT:
                 status=status,
             )
         except Exception:
+            logger.exception(
+                "Local STT transcribe failed status=error model=%s duration_ms=%s rms=%s",
+                self.model_name,
+                duration_ms,
+                rms,
+            )
             return STTResult(
                 text="",
                 confidence=0.0,

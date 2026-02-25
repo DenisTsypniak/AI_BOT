@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block title %}SQL Запити - Live Role Bot{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1 class="page-title">SQL Query Tool</h1>
+    <p class="page-description">Виконуйте власні запити (Read-Only). Дозволені лише <code>SELECT</code> та
+        <code>WITH</code>.
+    </p>
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+    <form method="POST" action="/query" style="display: flex; flex-direction: column; gap: 15px;">
+        <label for="query" style="font-weight: bold; color: var(--text-main);">Аналітичний запит:</label>
+        <textarea id="query" name="query" rows="6" placeholder="SELECT * FROM messages LIMIT 10;"
+            style="width: 100%; padding: 15px; border-radius: 8px; border: 1px solid var(--border-color); background-color: var(--surface-color); color: var(--text-main); font-family: monospace; font-size: 1rem; resize: vertical;">{{ query }}</textarea>
+        <div style="display: flex; gap: 10px;">
+            <button type="submit" class="btn primary" style="padding: 10px 20px; font-size: 1rem;">Виконати (▶)</button>
+            <a href="/query" class="btn" style="padding: 10px 20px; font-size: 1rem;">Очистити</a>
+        </div>
+    </form>
+
+    <div style="margin-top: 15px; font-size: 0.85rem;">
+        <span style="color: var(--text-muted); margin-right: 10px;">Приклади (клікніть щоб підставити):</span>
+        <button class="btn" style="padding: 3px 8px; font-size: 0.8rem; border-color: transparent"
+            onclick="document.getElementById('query').value='SELECT * FROM pg_stat_activity WHERE state=\'active\'';">Active
+            Queries</button>
+        <button class="btn" style="padding: 3px 8px; font-size: 0.8rem; border-color: transparent"
+            onclick="document.getElementById('query').value='SELECT * FROM messages ORDER BY message_id DESC LIMIT 10';">Останні
+            10 повідомлень</button>
+        <button class="btn" style="padding: 3px 8px; font-size: 0.8rem; border-color: transparent"
+            onclick="document.getElementById('query').value='EXPLAIN SELECT * FROM users';">EXPLAIN Users</button>
+    </div>
+</div>
+
+{% if result %}
+<div style="margin-top: 30px;">
+    {% if not result.success %}
+    <div class="card" style="border-left: 4px solid var(--red); background-color: rgba(255, 69, 58, 0.1);">
+        <h3 style="color: var(--red); margin-top: 0;">Помилка виконання</h3>
+        <p style="font-family: monospace; color: var(--text-main); margin-bottom: 0;">{{ result.error }}</p>
+    </div>
+    {% else %}
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+        <h2 style="margin: 0;">Результати</h2>
+        <div style="color: var(--text-muted); font-size: 0.9rem;">
+            Час виконання: <strong>{{"%.0f"|format(result.execution_time_ms)}} ms</strong>
+            | Знайдено рядків: <strong>{{ result.rows|length }}</strong>
+            {% if result.truncated %}
+            <span style="color: var(--warning); margin-left: 10px;">(Обрізано до 500 для стабільності)</span>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if result.rows %}
+    <div class="table-container" style="overflow-x: auto;">
+        <table style="white-space: nowrap;">
+            <thead>
+                <tr>
+                    {% for col in result.columns %}
+                    <th>{{ col }}</th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in result.rows %}
+                <tr>
+                    {% for col in result.columns %}
+                    {% set val = row[col] %}
+                    {% if val is none %}
+                    <td style="color: var(--text-muted); font-style: italic;">NULL</td>
+                    {% elif val is number %}
+                    <td style="font-family: monospace; text-align: right; color: var(--accent);">{{ val }}</td>
+                    {% elif val is string and val|length > 100 %}
+                    <td title="{{ val }}">{{ val[:97] }}...</td>
+                    {% else %}
+                    <td style="max-width: 400px; overflow: hidden; text-overflow: ellipsis;">{{ val }}</td>
+                    {% endif %}
+                    {% endfor %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="card" style="text-align: center; color: var(--text-muted); padding: 40px;">
+        Запит виконано успішно, але не повернуто жодного рядка.
+    </div>
+    {% endif %}
+
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

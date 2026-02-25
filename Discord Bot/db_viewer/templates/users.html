@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block title %}Користувачі - Live Role Bot{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Користувачі</h1>
+        <p class="page-description">Список унікальних користувачів, які взаємодіяли з ботом.</p>
+    </div>
+</div>
+
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>ID Сервера</th>
+                <th>ID Користувача</th>
+                <th>Discord Username</th>
+                <th>Мітка (Label)</th>
+                <th>Перша поява</th>
+                <th>Останнє повідомлення</th>
+                <th>К-сть повідомлень</th>
+                <th>Дії</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for user in users %}
+            <tr>
+                <td style="font-family: monospace;">{{ user.guild_id }}</td>
+                <td style="font-family: monospace;">{{ user.user_id }}</td>
+                <td><strong>{{ user.discord_username or 'Невідомо' }}</strong></td>
+                <td><span class="badge blue">{{ user.combined_label }}</span></td>
+                <td style="font-size: 0.85rem; color: var(--text-muted);">{{ user.first_seen|kyiv_time('%Y-%m-%d %H:%M')
+                    }}</td>
+                <td style="font-size: 0.85rem; color: var(--text-muted);">{{ user.updated_at|kyiv_time('%Y-%m-%d %H:%M')
+                    }}</td>
+                <td style="text-align: right; font-family: monospace; color: var(--accent);">
+                    {{ user.message_count }}
+                </td>
+                <td>
+                    <a href="/users/{{ user.guild_id }}/{{ user.user_id }}" class="btn primary"
+                        style="padding: 4px 8px; font-size: 0.8rem;">Деталі</a>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="8" style="text-align: center; padding: 30px; color: var(--text-muted);">Користувачів не
+                    знайдено.
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="pagination">
+    {% set prev_offset = offset - limit %}
+    {% set next_offset = offset + limit %}
+
+    {% if offset > 0 %}
+    <a href="/users?limit={{ limit }}&offset={{ prev_offset }}" class="btn">Попередня</a>
+    {% else %}
+    <button class="btn" disabled style="opacity: 0.5; cursor: not-allowed;">Попередня</button>
+    {% endif %}
+
+    {% if users|length == limit %}
+    <a href="/users?limit={{ limit }}&offset={{ next_offset }}" class="btn">Наступна</a>
+    {% else %}
+    <button class="btn" disabled style="opacity: 0.5; cursor: not-allowed;">Наступна</button>
+    {% endif %}
+</div>
+{% endblock %}

@@ -126,6 +126,36 @@ class Settings:
     summary_min_new_user_messages: int
     summary_window_messages: int
     summary_max_chars: int
+    persona_growth_enabled: bool
+    persona_growth_shadow_mode: bool
+    persona_relationship_enabled: bool
+    persona_episodic_enabled: bool
+    persona_retrieval_enabled: bool
+    persona_reflection_enabled: bool
+    persona_reflection_apply_enabled: bool
+    persona_trait_drift_enabled: bool
+    persona_admin_commands_enabled: bool
+    persona_id: str
+    persona_policy_version: int
+    persona_allowed_admin_user_ids: Set[int]
+    persona_prompt_cache_ttl_seconds: int
+    persona_text_prompt_budget_chars: int
+    persona_voice_prompt_budget_chars: int
+    persona_reflection_min_interval_minutes: int
+    persona_reflection_min_new_messages: int
+    persona_reflection_llm_proposer_enabled: bool
+    persona_reflection_llm_temperature: float
+    persona_reflection_llm_max_output_tokens: int
+    persona_reflection_llm_message_sample_limit: int
+    persona_decay_enabled: bool
+    persona_decay_min_interval_minutes: int
+    persona_episode_recall_reconfirm_enabled: bool
+    persona_episode_recall_reconfirm_throttle_seconds: int
+    persona_relationship_daily_influence_cap: float
+    persona_episode_text_top_k: int
+    persona_episode_voice_top_k: int
+    persona_queue_isolation_enabled: bool
+    persona_event_queue_maxsize: int
 
     voice_enabled: bool
     voice_auto_join_on_mention: bool
@@ -192,6 +222,47 @@ class Settings:
             summary_min_new_user_messages=_env_int("SUMMARY_MIN_NEW_USER_MESSAGES", 5),
             summary_window_messages=_env_int("SUMMARY_WINDOW_MESSAGES", 24),
             summary_max_chars=_env_int("SUMMARY_MAX_CHARS", 1100),
+            persona_growth_enabled=_env_bool("PERSONA_GROWTH_ENABLED", False),
+            persona_growth_shadow_mode=_env_bool("PERSONA_GROWTH_SHADOW_MODE", True),
+            persona_relationship_enabled=_env_bool("PERSONA_RELATIONSHIP_ENABLED", True),
+            persona_episodic_enabled=_env_bool("PERSONA_EPISODIC_ENABLED", False),
+            persona_retrieval_enabled=_env_bool("PERSONA_RETRIEVAL_ENABLED", False),
+            persona_reflection_enabled=_env_bool("PERSONA_REFLECTION_ENABLED", False),
+            persona_reflection_apply_enabled=_env_bool("PERSONA_REFLECTION_APPLY_ENABLED", False),
+            persona_trait_drift_enabled=_env_bool("PERSONA_TRAIT_DRIFT_ENABLED", False),
+            persona_admin_commands_enabled=_env_bool("PERSONA_ADMIN_COMMANDS_ENABLED", False),
+            persona_id=_env_str("PERSONA_ID", "liza"),
+            persona_policy_version=_env_int("PERSONA_POLICY_VERSION", 1),
+            persona_allowed_admin_user_ids=_env_id_set("PERSONA_ALLOWED_ADMIN_USER_IDS"),
+            persona_prompt_cache_ttl_seconds=_env_int("PERSONA_PROMPT_CACHE_TTL_SECONDS", 18),
+            persona_text_prompt_budget_chars=_env_int("PERSONA_TEXT_PROMPT_BUDGET_CHARS", 700),
+            persona_voice_prompt_budget_chars=_env_int("PERSONA_VOICE_PROMPT_BUDGET_CHARS", 260),
+            persona_reflection_min_interval_minutes=_env_int(
+                "PERSONA_REFLECTION_MIN_INTERVAL_MINUTES",
+                60,
+                aliases=("PERSONA_REFLECTION_MIN_INTERVAL_MIN",),
+            ),
+            persona_reflection_min_new_messages=_env_int("PERSONA_REFLECTION_MIN_NEW_MESSAGES", 30),
+            persona_reflection_llm_proposer_enabled=_env_bool("PERSONA_REFLECTION_LLM_PROPOSER_ENABLED", False),
+            persona_reflection_llm_temperature=_env_float("PERSONA_REFLECTION_LLM_TEMPERATURE", 0.12),
+            persona_reflection_llm_max_output_tokens=_env_int("PERSONA_REFLECTION_LLM_MAX_OUTPUT_TOKENS", 1200),
+            persona_reflection_llm_message_sample_limit=_env_int("PERSONA_REFLECTION_LLM_MESSAGE_SAMPLE_LIMIT", 18),
+            persona_decay_enabled=_env_bool("PERSONA_DECAY_ENABLED", False),
+            persona_decay_min_interval_minutes=_env_int(
+                "PERSONA_DECAY_MIN_INTERVAL_MINUTES",
+                180,
+                aliases=("PERSONA_DECAY_MIN_INTERVAL_MIN",),
+            ),
+            persona_episode_recall_reconfirm_enabled=_env_bool("PERSONA_EPISODE_RECALL_RECONFIRM_ENABLED", True),
+            persona_episode_recall_reconfirm_throttle_seconds=_env_int(
+                "PERSONA_EPISODE_RECALL_RECONFIRM_THROTTLE_SECONDS",
+                45,
+            ),
+            persona_relationship_daily_influence_cap=_env_float("PERSONA_RELATIONSHIP_DAILY_INFLUENCE_CAP", 1.0),
+            persona_episode_text_top_k=_env_int("PERSONA_EPISODE_TEXT_TOP_K", 2),
+            persona_episode_voice_top_k=_env_int("PERSONA_EPISODE_VOICE_TOP_K", 1),
+            persona_queue_isolation_enabled=_env_bool("PERSONA_QUEUE_ISOLATION_ENABLED", False),
+            persona_event_queue_maxsize=_env_int("PERSONA_EVENT_QUEUE_MAXSIZE", 260),
             voice_enabled=_env_bool("VOICE_ENABLED", True),
             voice_auto_join_on_mention=_env_bool(
                 "VOICE_AUTO_JOIN_ON_MENTION",
@@ -265,6 +336,44 @@ class Settings:
             raise ValueError("SUMMARY_WINDOW_MESSAGES must be >= 6")
         if self.summary_max_chars < 200:
             raise ValueError("SUMMARY_MAX_CHARS must be >= 200")
+        if not self.persona_id.strip():
+            raise ValueError("PERSONA_ID cannot be empty")
+        if self.persona_policy_version < 1:
+            raise ValueError("PERSONA_POLICY_VERSION must be >= 1")
+        if self.persona_prompt_cache_ttl_seconds < 1:
+            raise ValueError("PERSONA_PROMPT_CACHE_TTL_SECONDS must be >= 1")
+        if self.persona_text_prompt_budget_chars < 120:
+            raise ValueError("PERSONA_TEXT_PROMPT_BUDGET_CHARS must be >= 120")
+        if self.persona_voice_prompt_budget_chars < 60:
+            raise ValueError("PERSONA_VOICE_PROMPT_BUDGET_CHARS must be >= 60")
+        if self.persona_reflection_min_interval_minutes < 1:
+            raise ValueError("PERSONA_REFLECTION_MIN_INTERVAL_MINUTES must be >= 1")
+        if self.persona_reflection_min_new_messages < 1:
+            raise ValueError("PERSONA_REFLECTION_MIN_NEW_MESSAGES must be >= 1")
+        if self.persona_reflection_llm_temperature < 0.0 or self.persona_reflection_llm_temperature > 1.0:
+            raise ValueError("PERSONA_REFLECTION_LLM_TEMPERATURE must be in [0, 1]")
+        if self.persona_reflection_llm_max_output_tokens < 256 or self.persona_reflection_llm_max_output_tokens > 4096:
+            raise ValueError("PERSONA_REFLECTION_LLM_MAX_OUTPUT_TOKENS must be in [256, 4096]")
+        if (
+            self.persona_reflection_llm_message_sample_limit < 4
+            or self.persona_reflection_llm_message_sample_limit > 40
+        ):
+            raise ValueError("PERSONA_REFLECTION_LLM_MESSAGE_SAMPLE_LIMIT must be in [4, 40]")
+        if self.persona_decay_min_interval_minutes < 1 or self.persona_decay_min_interval_minutes > 24 * 60:
+            raise ValueError("PERSONA_DECAY_MIN_INTERVAL_MINUTES must be in [1, 1440]")
+        if (
+            self.persona_episode_recall_reconfirm_throttle_seconds < 5
+            or self.persona_episode_recall_reconfirm_throttle_seconds > 600
+        ):
+            raise ValueError("PERSONA_EPISODE_RECALL_RECONFIRM_THROTTLE_SECONDS must be in [5, 600]")
+        if self.persona_relationship_daily_influence_cap < 0.1 or self.persona_relationship_daily_influence_cap > 5.0:
+            raise ValueError("PERSONA_RELATIONSHIP_DAILY_INFLUENCE_CAP must be in [0.1, 5.0]")
+        if self.persona_episode_text_top_k < 0 or self.persona_episode_text_top_k > 6:
+            raise ValueError("PERSONA_EPISODE_TEXT_TOP_K must be in [0, 6]")
+        if self.persona_episode_voice_top_k < 0 or self.persona_episode_voice_top_k > 3:
+            raise ValueError("PERSONA_EPISODE_VOICE_TOP_K must be in [0, 3]")
+        if self.persona_event_queue_maxsize < 20 or self.persona_event_queue_maxsize > 2000:
+            raise ValueError("PERSONA_EVENT_QUEUE_MAXSIZE must be in [20, 2000]")
 
         if self.voice_silence_rms < 20:
             raise ValueError("VOICE_SILENCE_RMS must be >= 20")

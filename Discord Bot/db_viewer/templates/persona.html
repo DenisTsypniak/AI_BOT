@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+
+{% block title %}Стан Персони - Live Role Bot{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1 class="page-title">Стан Персони</h1>
+    <p class="page-description">Поточні внутрішні риси, швидкості зсуву та активний профіль особистості.</p>
+</div>
+
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 150px;">Ярлик Риси</th>
+                <th>Опис та Ключ</th>
+                <th style="text-align: right; width: 100px;">Поточне Значення</th>
+                <th style="text-align: right; width: 100px;">Якірне Значення</th>
+                <th style="text-align: right; width: 100px;">Швидкість Зсуву</th>
+                <th style="width: 100px;">Докази</th>
+                <th style="width: 120px;">Остання зміна</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for trait in traits %}
+            <tr>
+                <td>
+                    <strong>{{ trait.label }}</strong>
+                    <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px;">
+                        {% if trait.status == 'active' %}
+                        <span style="color: var(--success);">● Активна</span>
+                        {% elif trait.status == 'emerging' %}
+                        <span style="color: var(--warning);">● Зароджується</span>
+                        {% else %}
+                        <span style="color: var(--text-muted);">● {{ trait.status }}</span>
+                        {% endif %}
+                    </div>
+                </td>
+                <td>
+                    <div style="font-family: monospace; font-size: 0.8rem; color: var(--accent); margin-bottom: 4px;">{{
+                        trait.trait_key }}</div>
+                    <div class="text-wrap" style="color: var(--text-muted); font-size: 0.9rem;">{{ trait.description }}
+                    </div>
+                </td>
+
+                <td
+                    class="font-weight-bold text-right text-lg {% if trait.current_value > 0.0 %}text-green{% elif trait.current_value < 0.0 %}text-red{% else %}text-white{% endif %}">
+                    {{"%+.2f"|format(trait.current_value)}}
+                </td>
+
+                <td style="text-align: right; color: var(--text-muted); font-family: monospace;">
+                    {{"%+.2f"|format(trait.anchor_value)}}
+                </td>
+
+                <td style="text-align: right;">
+                    <span
+                        class="{% if trait.drift_velocity > 0 %}text-green{% elif trait.drift_velocity < 0 %}text-red{% else %}text-muted{% endif %}">
+                        {{"%+.3f"|format(trait.drift_velocity)}}
+                    </span>
+                </td>
+
+                <td style="text-align: center;">
+                    <span class="badge"
+                        style="background-color: var(--surface-color); border: 1px solid var(--border-color);">{{
+                        trait.evidence_count }} елем.</span>
+                </td>
+
+                <td style="color: var(--text-muted); font-size: 0.85rem;">{{ trait.updated_at|kyiv_time(default='Н/Д')
+                    }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="7" style="text-align: center; padding: 30px; color: var(--text-muted);">Рис ще не записано.
+                    Зростання Персони може бути вимкнене.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="stats-grid" style="margin-top: 30px;">
+    <div class="stat-card" style="border-left: 4px solid var(--warning);">
+        <h3 style="margin-top: 0; color: var(--text-main);">Деталі Рушія Зростання</h3>
+        <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 0;">
+            Рушій Персони запускає фонові цикли рефлексії (на основі налаштованих інтервалів), оцінюючи взаємодії
+            та коригуючи вектори вище. Значення природно повертаються до Якірних без підкріплення.
+        </p>
+    </div>
+
+    <div class="stat-card"
+        style="border-left: 4px solid var(--accent); display: flex; flex-direction: column; gap: 10px;">
+        <h3 style="margin-top: 0; margin-bottom: 5px; color: var(--text-main);">Детальні Журнали Персони</h3>
+        <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+            <a href="/persona/reflections" class="btn primary" style="font-size: 0.85rem;">🧠 Рефлексії</a>
+            <a href="/persona/relationships" class="btn primary" style="font-size: 0.85rem;">🤝 Відносини</a>
+            <a href="/persona/evidence" class="btn primary" style="font-size: 0.85rem;">📂 Докази (Evidence)</a>
+            <a href="/persona/audit" class="btn primary" style="font-size: 0.85rem;">📜 Аудит Лог</a>
+        </div>
+    </div>
+</div>
+{% endblock %}

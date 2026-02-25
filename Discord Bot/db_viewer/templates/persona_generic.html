@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} - Live Role Bot{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <h1 class="page-title">{{ title }}</h1>
+            <p class="page-description">Останні збережені записи таблиці.</p>
+        </div>
+        <a href="/persona" class="btn">← Назад</a>
+    </div>
+</div>
+
+{% if error %}
+<div
+    style="background-color: rgba(239, 68, 68, 0.1); border-left: 4px solid var(--red); padding: 15px; margin-bottom: 20px; border-radius: 4px;">
+    <h3 style="color: var(--red); margin-top: 0;">Помилка Завантаження Даних</h3>
+    <code
+        style="display: block; color: var(--text-main); font-family: monospace; white-space: pre-wrap;">{{ error }}</code>
+</div>
+{% endif %}
+
+<div class="table-container" style="overflow-x: auto;">
+    <table style="white-space: nowrap;">
+        <thead>
+            <tr>
+                {% if rows %}
+                {% for col in rows[0].keys() %}
+                <th>{{ col }}</th>
+                {% endfor %}
+                {% endif %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr>
+                {% for col, val in row.items() %}
+                {% if loop.index0 == 0 and col.endswith('_id') %}
+                <td style="font-family: monospace; color: var(--accent);">
+                    {{ val }}
+                    {% if can_view_detail %}
+                    <a href="{{ endpoint }}/{{ val }}" class="btn primary"
+                        style="padding: 2px 6px; font-size: 0.7rem; margin-left: 8px;">Дет.</a>
+                    {% endif %}
+                </td>
+                {% elif val is none %}
+                <td style="color: var(--text-muted); font-style: italic;">NULL</td>
+                {% elif 'time' in col or 'date' in col or 'created_at' in col or 'updated_at' in col %}
+                <td style="color: var(--text-muted); font-size: 0.85rem;">{{ val|kyiv_time('%Y-%m-%d %H:%M:%S',
+                    default=val) }}</td>
+                {% elif val is number %}
+                <td style="font-family: monospace; text-align: right; color: var(--accent);">{{ val }}</td>
+                {% elif val is string and (val.startswith('{') or val.startswith('[')) %}
+                <td>
+                    <pre
+                        style="margin: 0; max-height: 200px; overflow: auto; background-color: var(--background-color); padding: 5px; border-radius: 4px; font-size: 0.8rem;">{{ val|json_pretty }}</pre>
+                </td>
+                {% elif val is string and val|length > 60 %}
+                <td title="{{ val }}">{{ val[:57] }}...</td>
+                {% else %}
+                <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis;">{{ val }}</td>
+                {% endif %}
+                {% endfor %}
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="10" style="text-align: center; padding: 30px; color: var(--text-muted);">Дані відсутні або
+                    таблиця ще не створена.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="pagination">
+    {% set prev_offset = offset - limit %}
+    {% set next_offset = offset + limit %}
+
+    {% if offset > 0 %}
+    <a href="{{ endpoint }}?limit={{ limit }}&offset={{ prev_offset }}" class="btn">Попередня</a>
+    {% else %}
+    <button class="btn" disabled style="opacity: 0.5; cursor: not-allowed;">Попередня</button>
+    {% endif %}
+
+    {% if rows|length == limit %}
+    <a href="{{ endpoint }}?limit={{ limit }}&offset={{ next_offset }}" class="btn">Наступна</a>
+    {% else %}
+    <button class="btn" disabled style="opacity: 0.5; cursor: not-allowed;">Наступна</button>
+    {% endif %}
+</div>
+{% endblock %}
