@@ -5,6 +5,7 @@ import contextlib
 import logging
 import os
 from pathlib import Path
+import signal
 import site
 import sys
 
@@ -26,7 +27,7 @@ bootstrap_local_venv()
 from .config import Settings
 from .discord.client import LiveRoleDiscordBot
 from .memory.extractor import MemoryExtractor
-from .memory.store import MemoryStore
+from .memory.factory import build_memory_store
 from .services.gemini_client import GeminiClient
 from .services.local_stt import LocalSTT
 
@@ -56,6 +57,18 @@ def _ensure_terminal_only() -> None:
         return
     if not (_is_tty(sys.stdin) and _is_tty(sys.stdout)):
         raise RuntimeError("This bot must be started from an interactive terminal.")
+
+
+def _install_signal_handlers() -> None:
+    def _raise_keyboard_interrupt(signum: int, frame: object | None) -> None:
+        raise KeyboardInterrupt
+
+    for sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        with contextlib.suppress(Exception):
+            signal.signal(sig, _raise_keyboard_interrupt)
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -118,7 +131,7 @@ def _release_instance_lock(lock_path: Path) -> None:
 
 
 def build_bot(settings: Settings) -> LiveRoleDiscordBot:
-    memory = MemoryStore(settings.sqlite_path)
+    memory = build_memory_store(settings.sqlite_path)
     llm = GeminiClient(
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
@@ -182,6 +195,7 @@ async def _run_bot(settings: Settings) -> None:
 
 def main() -> None:
     configure_logging()
+    _install_signal_handlers()
     _ensure_terminal_only()
     settings = Settings.from_env()
     settings.validate()

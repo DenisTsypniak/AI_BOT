@@ -166,3 +166,15 @@ class PendingVoiceTurn:
     user_id: int
     user_label: str
     pcm_48k_stereo: bytes
+
+
+@dataclass(slots=True)
+class ConversationSessionState:
+    mood: str = "neutral"
+    energy: str = "medium"
+    topic_hint: str = ""
+    open_loop: str = ""
+    tease_level: str = "low"
+    last_user_text: str = ""
+    last_bot_text: str = ""
+    repeated_openers: dict[str, int] = field(default_factory=dict)

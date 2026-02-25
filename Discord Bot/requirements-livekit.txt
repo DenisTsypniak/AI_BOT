@@ -1,0 +1,5 @@
+# Optional dependencies for the LiveKit agent runtime (Phase 1).
+# Install in the same venv as the Discord bot:
+#   pip install -r requirements-livekit.txt
+livekit-agents[google,silero]~=1.3
+

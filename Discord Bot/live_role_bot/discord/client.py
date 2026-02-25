@@ -11,9 +11,18 @@ from ..config import Settings
 from ..memory.extractor import MemoryExtractor
 from ..memory.store import MemoryStore
 from ..services.gemini_client import GeminiClient
+from ..services.livekit.bridge import LiveKitDiscordBridgeManager
+from ..services.livekit.config import LiveKitAgentSettings
 from ..services.native_audio import GeminiNativeAudioManager
 from ..services.local_stt import LocalSTT
-from .common import PendingProfileUpdate, PendingSummaryUpdate, PendingVoiceTurn, VoiceTurnBuffer, load_rp_canon
+from .common import (
+    ConversationSessionState,
+    PendingProfileUpdate,
+    PendingSummaryUpdate,
+    PendingVoiceTurn,
+    VoiceTurnBuffer,
+    load_rp_canon,
+)
 from .mixins.dialogue_mixin import DialogueMixin
 from .mixins.identity_mixin import IdentityMixin
 from .mixins.workers_voice_mixin import WorkersVoiceMixin
@@ -78,6 +87,8 @@ class LiveRoleDiscordBot(
         self._native_user_transcripts: dict[tuple[int, int, str], float] = {}
         self._native_assistant_transcripts: dict[tuple[int, str], float] = {}
         self._native_transcript_dedupe_seconds = 6.0
+        self.conversation_states: dict[str, ConversationSessionState] = {}
+        self.recent_assistant_replies: dict[str, list[str]] = {}
 
         self.native_audio: GeminiNativeAudioManager | None = None
         if self.settings.gemini_native_audio_enabled:
@@ -86,6 +97,20 @@ class LiveRoleDiscordBot(
             except Exception as exc:
                 logger.error("Failed to initialize Gemini Native Audio manager: %s", exc)
                 self.native_audio = None
+        self.livekit_bridge: LiveKitDiscordBridgeManager | None = None
+        with contextlib.suppress(Exception):
+            lk_settings = LiveKitAgentSettings.from_env(settings)
+            if lk_settings.bridge_enabled:
+                try:
+                    lk_settings.validate_bridge()
+                    self.livekit_bridge = LiveKitDiscordBridgeManager(self, lk_settings)
+                    logger.info(
+                        "LiveKit bridge enabled (room_prefix=%s url=%s)",
+                        lk_settings.room_prefix,
+                        lk_settings.url,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to initialize LiveKit bridge manager: %s", exc)
         self.local_voice_fallback_enabled = self.settings.local_stt_enabled and not self.settings.gemini_native_audio_enabled
         install_voice_recv_decode_guard()
 
@@ -127,18 +152,28 @@ class LiveRoleDiscordBot(
             self.voice_flush_task = asyncio.create_task(self._voice_flush_loop(), name="voice-flush")
 
     async def close(self) -> None:
+        await self._run_shutdown_step("disconnect_voice_clients", self._disconnect_voice_clients(), timeout=6.0)
+        if self.livekit_bridge is not None:
+            await self._run_shutdown_step("livekit_bridge.shutdown_all", self.livekit_bridge.shutdown_all(), timeout=3.0)
         if self.native_audio is not None:
-            await self.native_audio.shutdown_all()
-        await self._disconnect_voice_clients()
+            await self._run_shutdown_step("native_audio.shutdown_all", self.native_audio.shutdown_all(), timeout=3.0)
 
         await self._cancel_task(self.profile_worker_task)
         await self._cancel_task(self.summary_worker_task)
         await self._cancel_task(self.voice_worker_task)
         await self._cancel_task(self.voice_flush_task)
 
-        await self.memory_extractor.close()
-        await self.llm.close()
-        await super().close()
+        await self._run_shutdown_step("memory_extractor.close", self.memory_extractor.close(), timeout=6.0)
+        await self._run_shutdown_step("llm.close", self.llm.close(), timeout=6.0)
+        await self._run_shutdown_step("discord.Client.close", super().close(), timeout=6.0)
+
+    async def _run_shutdown_step(self, label: str, coro: object, *, timeout: float) -> None:
+        try:
+            await asyncio.wait_for(coro, timeout=timeout)  # type: ignore[arg-type]
+        except asyncio.TimeoutError:
+            logger.warning("Shutdown step timed out: %s", label)
+        except Exception as exc:
+            logger.warning("Shutdown step failed: %s (%s)", label, exc)
 
     async def _cancel_task(self, task: asyncio.Task[None] | None) -> None:
         if task is None:
@@ -157,7 +192,7 @@ class LiveRoleDiscordBot(
                     if isinstance(vc, voice_recv.VoiceRecvClient) and vc.is_listening():
                         vc.stop_listening()
             with contextlib.suppress(Exception):
-                await vc.disconnect(force=True)
+                await asyncio.wait_for(vc.disconnect(force=True), timeout=4.0)
 
     async def on_ready(self) -> None:
         if self.user:

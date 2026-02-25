@@ -5,7 +5,7 @@ from typing import Any
 
 import discord
 
-from ..common import as_float, as_int, tokenize
+from ..common import as_float, as_int, tokenize, truncate
 from ...prompts.dialogue import (
     KNOWN_PARTICIPANT_MEMORY_HEADER,
     TEXT_CONVERSATION_BEHAVIOR,
@@ -21,6 +21,41 @@ from ...prompts.dialogue import (
 
 
 class PromptMixin:
+    def _build_session_state_block(self, channel_id: str) -> str:
+        state = self.conversation_states.get(channel_id)
+        if state is None:
+            return ""
+
+        lines = [
+            "Hidden session style state (guidance only, do not reveal):",
+            f"- mood: {state.mood}",
+            f"- energy: {state.energy}",
+            f"- tease_level: {state.tease_level}",
+        ]
+        if state.topic_hint:
+            lines.append(f"- current_topic_hint: {state.topic_hint}")
+        if state.open_loop:
+            lines.append(f"- unresolved_user_thread: {state.open_loop}")
+        if state.last_user_text:
+            lines.append(f"- latest_user_tone_sample: {truncate(state.last_user_text, 90)}")
+        return "\n".join(lines)
+
+    def _build_human_turn_policy_block(self, channel_id: str) -> str:
+        lines = [
+            "Human-like turn policy:",
+            "- Default: short, reactive, natural (1-3 sentences unless user asks for details).",
+            "- Usually ask at most one question.",
+            "- Start with varied wording; avoid repeating the same opener every turn.",
+            "- Sound like you listened: react to the user's emotional tone before giving advice/info.",
+            "- Prefer one useful next step over long explanations.",
+        ]
+        recent = [item for item in self.recent_assistant_replies.get(channel_id, []) if item.strip()]
+        if recent:
+            lines.append("Recent assistant wording to avoid repeating too closely:")
+            for item in recent[-3:]:
+                lines.append(f"- {truncate(item, 110)}")
+        return "\n".join(lines)
+
     async def _build_native_audio_system_prompt(
         self,
         guild: discord.Guild,
@@ -105,6 +140,8 @@ class PromptMixin:
             TEXT_CONVERSATION_BEHAVIOR,
             TEXT_DEBATE_BEHAVIOR,
             build_language_rule(self.settings.preferred_response_language),
+            self._build_human_turn_policy_block(channel_id),
+            self._build_session_state_block(channel_id),
         ]
 
         if summary_text:

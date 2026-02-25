@@ -116,8 +116,41 @@ class VoiceMixin:
             voice_client.stop_listening()
 
         self.voice_text_channels[guild.id] = text_channel_id
+        bridge_active = False
 
-        if self.settings.gemini_native_audio_enabled:
+        if getattr(self, "livekit_bridge", None) is not None:
+            try:
+                room_name = await self.livekit_bridge.start_session(
+                    guild_id=guild.id,
+                    voice_channel_id=target.id,
+                    text_channel_id=text_channel_id,
+                    bot_user_id=self.user.id if self.user else 0,
+                )
+                logger.info(
+                    "LiveKit bridge session started for guild=%s channel=%s room=%s",
+                    guild.id,
+                    target.id,
+                    room_name,
+                )
+                bridge_active = True
+            except Exception as exc:
+                logger.error("LiveKit bridge start failed for guild=%s: %s", guild.id, exc)
+                channel = self.get_channel(text_channel_id)
+                if isinstance(
+                    channel,
+                    (
+                        discord.TextChannel,
+                        discord.Thread,
+                        discord.DMChannel,
+                        discord.GroupChannel,
+                        discord.PartialMessageable,
+                    ),
+                ):
+                    with contextlib.suppress(Exception):
+                        await channel.send("LiveKit bridge failed to start. Check bot logs and LiveKit credentials.")
+                return False
+
+        if (not bridge_active) and self.settings.gemini_native_audio_enabled:
             if self.native_audio is None:
                 logger.error("Native Audio is enabled but manager is unavailable")
                 return False
@@ -168,6 +201,10 @@ class VoiceMixin:
         if key not in self._seen_voice_pcm_users:
             self._seen_voice_pcm_users.add(key)
             logger.info("[voice.input] first PCM packet from user=%s guild=%s", user_id, guild_id)
+
+        if getattr(self, "livekit_bridge", None) is not None and self.livekit_bridge.has_session(guild_id):
+            self.livekit_bridge.push_pcm(guild_id, user_id, user_label, pcm_48k_stereo)
+            return
 
         if self.settings.gemini_native_audio_enabled:
             if self.native_audio is not None and self.native_audio.has_session(guild_id):
