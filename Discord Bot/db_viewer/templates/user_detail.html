@@ -3,119 +3,193 @@
 {% block title %}Користувач {{ data.user.discord_username or user_id }} - Live Role Bot{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div>
-            <h1 class="page-title">{{ data.user.discord_username or 'Невідомий користувач' }} <span
-                    style="font-size: 1rem; color: var(--text-muted);">({{ data.user.combined_label }})</span></h1>
-            <p class="page-description">Guild ID: {{ guild_id }} | User ID: {{ user_id }}</p>
-        </div>
-        <div style="display: flex; gap: 10px; align-items: center;">
-            <form action="/users/{{ guild_id }}/{{ user_id }}/delete" method="POST"
-                onsubmit="return confirm('Ви впевнені, що хочете видалити користувача {{ data.user.discord_username or user_id }}?');"
-                style="margin: 0;">
-                <button type="submit" class="btn"
-                    style="background-color: var(--danger, #dc2626); color: white; border: none;">Видалити
-                    користувача</button>
-            </form>
-            <a href="/users" class="btn">← Назад до списку</a>
-        </div>
-    </div>
-</div>
+<style>
+    .user-detail-grid {
+        display: grid;
+        grid-template-columns: 1.08fr .92fr;
+        gap: 18px;
+        align-items: start;
+    }
+    .user-meta {
+        display: grid;
+        gap: 12px;
+    }
+    .user-header-line {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    .user-header-line .handle {
+        color: var(--text-muted);
+        font-size: .95rem;
+    }
+    .user-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    .user-actions form { margin: 0; }
+    .scroll-box {
+        max-height: 460px;
+        overflow: auto;
+    }
+    .scroll-box::-webkit-scrollbar { width: 10px; }
+    .scroll-box::-webkit-scrollbar-thumb {
+        background: rgba(148,163,184,.2);
+        border-radius: 999px;
+        border: 2px solid transparent;
+        background-clip: padding-box;
+    }
+    .fact-key {
+        font-family: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+        color: var(--accent);
+        font-size: .84rem;
+        word-break: break-word;
+    }
+    .fact-value-cell {
+        max-width: 360px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .msg-role-badge {
+        text-transform: uppercase;
+        letter-spacing: .05em;
+        font-size: .68rem;
+    }
+    .msg-role-badge.user { background: rgba(79,141,255,.14) !important; border-color: rgba(79,141,255,.26) !important; color: #b7d2ff !important; }
+    .msg-role-badge.assistant { background: rgba(16,185,129,.14) !important; border-color: rgba(16,185,129,.24) !important; color: #8ff0cc !important; }
+    .msg-role-badge.system { background: rgba(245,158,11,.14) !important; border-color: rgba(245,158,11,.24) !important; color: #ffd88a !important; }
+    @media (max-width: 1100px) {
+        .user-detail-grid { grid-template-columns: 1fr; }
+    }
+</style>
 
-<div class="stats-grid" style="margin-bottom: 30px;">
-    <div class="stat-card">
-        <h3>Вперше побачений</h3>
-        <p style="font-size: 1.2rem; color: var(--accent);">{{ data.user.first_seen|kyiv_time }}</p>
-    </div>
-    <div class="stat-card">
-        <h3>Останнє оновлення</h3>
-        <p style="font-size: 1.2rem; color: var(--accent);">{{ data.user.updated_at|kyiv_time }}</p>
-    </div>
-    <div class="stat-card">
-        <h3>Кількість фактів</h3>
-        <p style="font-size: 1.5rem; color: var(--success); font-weight: bold;">{{ data.facts|length }}</p>
-    </div>
-</div>
+<div class="stack">
+    <section class="page-header">
+        <div class="split">
+            <div class="user-meta">
+                <div class="user-header-line">
+                    <h1 class="page-title" style="margin:0;">{{ data.user.discord_username or 'Невідомий користувач' }}</h1>
+                    <span class="handle">({{ data.user.combined_label }})</span>
+                </div>
+                <p class="page-description">Guild ID: <span class="mono">{{ guild_id }}</span> | User ID: <span class="mono">{{ user_id }}</span></p>
+                <div class="chip-row">
+                    <span class="pill">Фактів <strong>{{ data.facts|length }}</strong></span>
+                    <span class="pill">Вперше <strong>{{ data.user.first_seen|kyiv_time('%Y-%m-%d %H:%M') }}</strong></span>
+                    <span class="pill">Оновлено <strong>{{ data.user.updated_at|kyiv_time('%Y-%m-%d %H:%M') }}</strong></span>
+                </div>
+            </div>
 
-<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
-    <div class="card">
-        <h2>Відомі Факти</h2>
-        <div class="table-container" style="max-height: 400px; overflow-y: auto;">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Ключ</th>
-                        <th>Значення</th>
-                        <th>Важливість</th>
-                        <th>Дії</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for fact in data.facts %}
-                    <tr>
-                        <td style="font-family: monospace;">{{ fact.fact_key }}</td>
-                        <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;"
-                            title="{{ fact.fact_value }}">{{ fact.fact_value }}</td>
-                        <td>{{ fact.importance }}</td>
-                        <td>
-                            <form action="/users/{{ guild_id }}/{{ user_id }}/facts/{{ fact.fact_id }}/delete"
-                                method="POST"
-                                onsubmit="return confirm('Ви впевнені, що хочете видалити факт `{{ fact.fact_key }}`?');"
-                                style="margin: 0;">
-                                <button type="submit" class="btn"
-                                    style="padding: 2px 6px; font-size: 0.7rem; background-color: var(--danger, #dc2626); color: white; border: none;">Вид.</button>
-                            </form>
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="4" style="text-align: center; color: var(--text-muted);">Жодного факту не знайдено.
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+            <div class="user-actions">
+                <a href="/users" class="btn">← Назад до списку</a>
+                <form action="/users/{{ guild_id }}/{{ user_id }}/delete" method="POST"
+                      onsubmit="return confirm('Ви впевнені, що хочете видалити користувача {{ data.user.discord_username or user_id }}?');">
+                    <button type="submit" class="btn" style="background-color: rgba(239,68,68,.16); border-color: rgba(239,68,68,.28); color:#ffd2d2;">Видалити користувача</button>
+                </form>
+            </div>
+        </div>
+    </section>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-title">Вперше побачений</div>
+            <div class="stat-value" style="font-size:1.35rem;">{{ data.user.first_seen|kyiv_time('%Y-%m-%d %H:%M') }}</div>
+            <div class="stat-subtitle">перший слід у базі</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-title">Останнє оновлення</div>
+            <div class="stat-value" style="font-size:1.35rem;">{{ data.user.updated_at|kyiv_time('%Y-%m-%d %H:%M') }}</div>
+            <div class="stat-subtitle">активність/пам'ять користувача</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-title">Кількість фактів</div>
+            <div class="stat-value" style="color: var(--success);">{{ data.facts|length }}</div>
+            <div class="stat-subtitle">у картці користувача</div>
         </div>
     </div>
 
-    <div class="card">
-        <h2>Останні Повідомлення</h2>
-        <div class="table-container" style="max-height: 400px; overflow-y: auto;">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Час</th>
-                        <th>Роль</th>
-                        <th>Текст</th>
-                        <th>Дії</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for msg in data.messages %}
-                    <tr>
-                        <td style="font-size: 0.85rem; color: var(--text-muted);">{{ msg.created_at|kyiv_time('%Y-%m-%d
-                            %H:%M:%S') }}</td>
-                        <td>
-                            <span
-                                class="badge {% if msg.role == 'user' %}primary{% elif msg.role == 'assistant' %}accent{% else %}warning{% endif %}">
-                                {{ msg.role }}
-                            </span>
-                        </td>
-                        <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
-                            title="{{ msg.content_clean }}">{{ msg.content_clean }}</td>
-                        <td><a href="/messages/{{ msg.message_id }}" class="btn"
-                                style="padding: 4px 8px; font-size: 0.8rem;">Дет.</a></td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="4" style="text-align: center; color: var(--text-muted);">Жодного повідомлення не
-                            знайдено.</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
+    <div class="user-detail-grid">
+        <section class="card stack-sm">
+            <div>
+                <h2 class="section-title">🧠 Відомі факти</h2>
+                <p class="section-subtitle">Збережені факти, які використовуються в пам'яті та відповіді бота.</p>
+            </div>
+            <div class="table-container scroll-box">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Ключ</th>
+                            <th>Значення</th>
+                            <th>Важливість</th>
+                            <th>Дії</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for fact in data.facts %}
+                        <tr>
+                            <td><div class="fact-key">{{ fact.fact_key }}</div></td>
+                            <td class="fact-value fact-value-cell" title="{{ fact.fact_value }}">{{ fact.fact_value }}</td>
+                            <td class="mono" style="color: var(--accent); font-weight:700;">{{ fact.importance }}</td>
+                            <td>
+                                <form action="/users/{{ guild_id }}/{{ user_id }}/facts/{{ fact.fact_id }}/delete"
+                                      method="POST"
+                                      onsubmit="return confirm('Видалити факт `{{ fact.fact_key }}`?');">
+                                    <button type="submit" class="btn" style="padding: 5px 8px; font-size: .78rem; background-color: rgba(239,68,68,.14); border-color: rgba(239,68,68,.24); color:#ffd2d2;">Вид.</button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="4">
+                                <div class="empty-state">У картці ще немає збережених фактів.</div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="card stack-sm">
+            <div>
+                <h2 class="section-title">🕘 Останні повідомлення</h2>
+                <p class="section-subtitle">Швидкий контекст розмови користувача з переходом у повні деталі.</p>
+            </div>
+            <div class="table-container scroll-box">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Час</th>
+                            <th>Роль</th>
+                            <th>Текст</th>
+                            <th>Дії</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for msg in data.messages %}
+                        <tr>
+                            <td class="text-muted" style="font-size: .82rem;">{{ msg.created_at|kyiv_time('%Y-%m-%d %H:%M:%S') }}</td>
+                            <td>
+                                <span class="badge msg-role-badge {{ msg.role if msg.role in ['user','assistant','system'] else '' }}">{{ msg.role }}</span>
+                            </td>
+                            <td class="truncate-1" style="max-width: 320px;" title="{{ msg.content_clean }}">{{ msg.content_clean }}</td>
+                            <td><a href="/messages/{{ msg.message_id }}" class="btn" style="padding:6px 10px; font-size:.82rem;">Деталі</a></td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="4">
+                                <div class="empty-state">Повідомлень не знайдено.</div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
     </div>
 </div>
 {% endblock %}
+

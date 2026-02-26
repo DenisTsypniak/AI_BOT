@@ -10,6 +10,7 @@ class OllamaChatClient(OllamaExtractorBackend):
     """Ollama chat client compatible with GeminiClient's `chat/json_chat` interface."""
 
     backend_name = "ollama"
+    request_kind = "chat request"
 
     @staticmethod
     def _sanitize_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:

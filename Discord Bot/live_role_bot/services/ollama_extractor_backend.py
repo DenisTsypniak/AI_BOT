@@ -11,6 +11,7 @@ import aiohttp
 
 class OllamaExtractorBackend:
     backend_name = "ollama"
+    request_kind = "request"
 
     def __init__(
         self,
@@ -121,8 +122,13 @@ class OllamaExtractorBackend:
                 await asyncio.sleep(min(4.0, 0.35 * attempt + random.random() * 0.25))
 
         if last_error is not None:
-            raise RuntimeError(f"Ollama extractor request failed after retries: {last_error}")
-        raise RuntimeError("Ollama extractor request failed without explicit error")
+            error_text = str(last_error).strip()
+            if not error_text:
+                error_text = f"{type(last_error).__name__}: {last_error!r}"
+            raise RuntimeError(
+                f"Ollama {getattr(self, 'request_kind', 'request')} failed after retries: {error_text}"
+            )
+        raise RuntimeError(f"Ollama {getattr(self, 'request_kind', 'request')} failed without explicit error")
 
     @staticmethod
     def _extract_message_text(data: dict[str, Any]) -> str:

@@ -3,77 +3,87 @@
 {% block title %}Користувачі - Live Role Bot{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <div>
-        <h1 class="page-title">Користувачі</h1>
-        <p class="page-description">Список унікальних користувачів, які взаємодіяли з ботом.</p>
+<div class="stack">
+    <section class="page-header">
+        <div class="split">
+            <div>
+                <h1 class="page-title">👥 Користувачі</h1>
+                <p class="page-description">Картки людей, які взаємодіяли з ботом. Тут видно базову статистику, мітки та швидкий перехід до фактів і історії повідомлень.</p>
+            </div>
+            <div class="chip-row">
+                <span class="pill">На сторінці <strong>{{ users|length }}</strong></span>
+                <span class="pill">Ліміт <strong>{{ limit }}</strong></span>
+                <span class="pill">Зсув <strong>{{ offset }}</strong></span>
+            </div>
+        </div>
+    </section>
+
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>ID сервера</th>
+                    <th>ID користувача</th>
+                    <th>Discord Username</th>
+                    <th>Мітка</th>
+                    <th>Перша поява</th>
+                    <th>Остання активність</th>
+                    <th>Повідомлень</th>
+                    <th>Дії</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr>
+                    <td class="mono">{{ user.guild_id }}</td>
+                    <td class="mono">{{ user.user_id }}</td>
+                    <td>
+                        <div class="stack-sm" style="gap:4px;">
+                            <strong>{{ user.discord_username or 'Невідомо' }}</strong>
+                            <span class="text-muted" style="font-size:.78rem;">{{ user.combined_label }}</span>
+                        </div>
+                    </td>
+                    <td><span class="badge blue">{{ user.combined_label }}</span></td>
+                    <td class="text-muted" style="font-size:.84rem;">{{ user.first_seen|kyiv_time('%Y-%m-%d %H:%M') }}</td>
+                    <td class="text-muted" style="font-size:.84rem;">{{ user.updated_at|kyiv_time('%Y-%m-%d %H:%M') }}</td>
+                    <td class="mono text-right" style="color: var(--accent); font-weight:700;">{{ user.message_count }}</td>
+                    <td>
+                        <div class="actions-inline">
+                            <a href="/users/{{ user.guild_id }}/{{ user.user_id }}" class="btn primary" style="padding:6px 10px; font-size:.82rem;">Деталі</a>
+                            <form action="/users/{{ user.guild_id }}/{{ user.user_id }}/delete" method="POST"
+                                  onsubmit="return confirm('Ви впевнені, що хочете видалити користувача {{ user.discord_username or user.user_id }}? Це видалить усі повʼязані дані!');">
+                                <button type="submit" class="btn" style="padding:6px 10px; font-size:.82rem; background-color: rgba(239,68,68,.16); border-color: rgba(239,68,68,.28); color:#ffd2d2;">Видалити</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="8">
+                        <div class="empty-state">Користувачів не знайдено.</div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="pagination">
+        {% set prev_offset = offset - limit %}
+        {% set next_offset = offset + limit %}
+
+        {% if offset > 0 %}
+        <a href="/users?limit={{ limit }}&offset={{ prev_offset }}" class="btn">← Попередня</a>
+        {% else %}
+        <button class="btn" disabled>← Попередня</button>
+        {% endif %}
+
+        {% if users|length == limit %}
+        <a href="/users?limit={{ limit }}&offset={{ next_offset }}" class="btn">Наступна →</a>
+        {% else %}
+        <button class="btn" disabled>Наступна →</button>
+        {% endif %}
     </div>
 </div>
-
-<div class="table-container">
-    <table>
-        <thead>
-            <tr>
-                <th>ID Сервера</th>
-                <th>ID Користувача</th>
-                <th>Discord Username</th>
-                <th>Мітка (Label)</th>
-                <th>Перша поява</th>
-                <th>Останнє повідомлення</th>
-                <th>К-сть повідомлень</th>
-                <th>Дії</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for user in users %}
-            <tr>
-                <td style="font-family: monospace;">{{ user.guild_id }}</td>
-                <td style="font-family: monospace;">{{ user.user_id }}</td>
-                <td><strong>{{ user.discord_username or 'Невідомо' }}</strong></td>
-                <td><span class="badge blue">{{ user.combined_label }}</span></td>
-                <td style="font-size: 0.85rem; color: var(--text-muted);">{{ user.first_seen|kyiv_time('%Y-%m-%d %H:%M')
-                    }}</td>
-                <td style="font-size: 0.85rem; color: var(--text-muted);">{{ user.updated_at|kyiv_time('%Y-%m-%d %H:%M')
-                    }}</td>
-                <td style="text-align: right; font-family: monospace; color: var(--accent);">
-                    {{ user.message_count }}
-                </td>
-                <td style="display: flex; gap: 5px;">
-                    <a href="/users/{{ user.guild_id }}/{{ user.user_id }}" class="btn primary"
-                        style="padding: 4px 8px; font-size: 0.8rem;">Деталі</a>
-                    <form action="/users/{{ user.guild_id }}/{{ user.user_id }}/delete" method="POST"
-                        onsubmit="return confirm('Ви впевнені, що хочете видалити користувача {{ user.discord_username or user.user_id }}? Це видалить всі пов\'язані дані!');"
-                        style="margin: 0;">
-                        <button type="submit" class="btn"
-                            style="padding: 4px 8px; font-size: 0.8rem; background-color: var(--danger, #dc2626); color: white; border: none;">Видалити</button>
-                    </form>
-                </td>
-            </tr>
-            {% else %}
-            <tr>
-                <td colspan="8" style="text-align: center; padding: 30px; color: var(--text-muted);">Користувачів не
-                    знайдено.
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</div>
-
-<div class="pagination">
-    {% set prev_offset = offset - limit %}
-    {% set next_offset = offset + limit %}
-
-    {% if offset > 0 %}
-    <a href="/users?limit={{ limit }}&offset={{ prev_offset }}" class="btn">Попередня</a>
-    {% else %}
-    <button class="btn" disabled style="opacity: 0.5; cursor: not-allowed;">Попередня</button>
-    {% endif %}
-
-    {% if users|length == limit %}
-    <a href="/users?limit={{ limit }}&offset={{ next_offset }}" class="btn">Наступна</a>
-    {% else %}
-    <button class="btn" disabled style="opacity: 0.5; cursor: not-allowed;">Наступна</button>
-    {% endif %}
-</div>
 {% endblock %}
+

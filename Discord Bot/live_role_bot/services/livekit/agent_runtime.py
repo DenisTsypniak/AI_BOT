@@ -157,6 +157,8 @@ class _BridgeRuntimeContextState:
     last_memory_focus_user_id: str = ""
     last_memory_focus_label: str = ""
     last_memory_hash: str = ""
+    last_applied_memory_hash: str = ""
+    last_applied_focus_user_id: str = ""
     memory_backfill_attempts: int = 0
     memory_backfill_saved: int = 0
     memory_backfill_skipped: int = 0
@@ -1564,6 +1566,23 @@ async def _handle_session(ctx: Any) -> None:
                     cache=memory_cache,
                     max_chars=max(220, min(720, lk_settings.agent_runtime_context_max_chars + 180)),
                 )
+                current_focus_user_id = str(runtime_ctx.last_memory_focus_user_id or "")
+                current_memory_hash = (
+                    hashlib.sha1(memory_block.encode("utf-8", errors="ignore")).hexdigest()
+                    if memory_block
+                    else ""
+                )
+                # Google Native Audio restarts the realtime session on instruction updates.
+                # Avoid runtime-only churn (speaker hints/bridge stats) after first apply unless
+                # the actual retrieved user memory or focus user changed.
+                if (
+                    "native-audio" in str(lk_settings.google_realtime_model or "").lower()
+                    and runtime_ctx.updates_applied > 0
+                    and current_memory_hash == str(runtime_ctx.last_applied_memory_hash or "")
+                    and current_focus_user_id == str(runtime_ctx.last_applied_focus_user_id or "")
+                ):
+                    runtime_ctx.updates_ignored += 1
+                    continue
                 if runtime_ctx.updates_received > 0 and runtime_ctx.updates_applied <= 0:
                     logger.debug(
                         "[livekit.ctx] building runtime instructions room=%s runtime_chars=%s memory_chars=%s focus_user=%s",
@@ -1609,6 +1628,8 @@ async def _handle_session(ctx: Any) -> None:
                     runtime_ctx.last_applied_hash = merged_hash
                     runtime_ctx.last_applied_chars = len(runtime_block)
                     runtime_ctx.last_applied_at = time.monotonic()
+                    runtime_ctx.last_applied_memory_hash = current_memory_hash
+                    runtime_ctx.last_applied_focus_user_id = current_focus_user_id
                     runtime_ctx.updates_applied += 1
                     runtime_ctx.last_apply_error = ""
                     health.mark_activity()

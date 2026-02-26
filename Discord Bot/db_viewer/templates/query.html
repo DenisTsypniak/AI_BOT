@@ -3,93 +3,131 @@
 {% block title %}SQL Запити - Live Role Bot{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1 class="page-title">SQL Query Tool</h1>
-    <p class="page-description">Виконуйте власні запити. Дозволені <code>SELECT</code>, <code>WITH</code> та
-        <code>EXPLAIN</code>.
-    </p>
-</div>
+<style>
+    .query-layout { display: grid; gap: 16px; }
+    .query-editor textarea {
+        width: 100%;
+        min-height: 160px;
+        resize: vertical;
+        font-family: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+        font-size: .95rem;
+        line-height: 1.45;
+        padding: 14px;
+    }
+    .query-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    .query-examples {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+    }
+    .query-error {
+        border-left: 4px solid rgba(239,68,68,.65);
+        background: rgba(239,68,68,.08);
+    }
+    .query-result-meta {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    .null-cell {
+        color: var(--text-muted);
+        font-style: italic;
+    }
+</style>
 
-<div class="card" style="margin-bottom: 20px;">
-    <form method="POST" action="/query" style="display: flex; flex-direction: column; gap: 15px;">
-        <label for="query" style="font-weight: bold; color: var(--text-main);">Аналітичний запит:</label>
-        <textarea id="query" name="query" rows="6" placeholder="SELECT * FROM messages LIMIT 10;"
-            style="width: 100%; padding: 15px; border-radius: 8px; border: 1px solid var(--border-color); background-color: var(--surface-color); color: var(--text-main); font-family: monospace; font-size: 1rem; resize: vertical;">{{ query }}</textarea>
-        <div style="display: flex; gap: 10px;">
-            <button type="submit" class="btn primary" style="padding: 10px 20px; font-size: 1rem;">Виконати (▶)</button>
-            <a href="/query" class="btn" style="padding: 10px 20px; font-size: 1rem;">Очистити</a>
-        </div>
-    </form>
+<div class="query-layout">
+    <section class="page-header">
+        <h1 class="page-title">🔎 SQL Query Tool</h1>
+        <p class="page-description">Read-only консоль для аналітики й діагностики. Дозволені тільки <code>SELECT</code>, <code>WITH</code> та <code>EXPLAIN</code>.</p>
+    </section>
 
-    <div style="margin-top: 15px; font-size: 0.85rem;">
-        <span style="color: var(--text-muted); margin-right: 10px;">Приклади (клікніть щоб підставити):</span>
-        <button class="btn" style="padding: 3px 8px; font-size: 0.8rem; border-color: transparent"
-            onclick="document.getElementById('query').value='SELECT * FROM pg_stat_activity WHERE state=\'active\'';">Active
-            Queries</button>
-        <button class="btn" style="padding: 3px 8px; font-size: 0.8rem; border-color: transparent"
-            onclick="document.getElementById('query').value='SELECT * FROM messages ORDER BY message_id DESC LIMIT 10';">Останні
-            10 повідомлень</button>
-        <button class="btn" style="padding: 3px 8px; font-size: 0.8rem; border-color: transparent"
-            onclick="document.getElementById('query').value='EXPLAIN SELECT * FROM users';">EXPLAIN Users</button>
-    </div>
-</div>
+    <section class="card query-editor">
+        <form method="POST" action="/query" class="stack">
+            <div class="stack-sm">
+                <label for="query">Аналітичний запит</label>
+                <textarea id="query" name="query" rows="7" placeholder="SELECT * FROM messages ORDER BY message_id DESC LIMIT 20;">{{ query }}</textarea>
+            </div>
 
-{% if result %}
-<div style="margin-top: 30px;">
-    {% if not result.success %}
-    <div class="card" style="border-left: 4px solid var(--red); background-color: rgba(255, 69, 58, 0.1);">
-        <h3 style="color: var(--red); margin-top: 0;">Помилка виконання</h3>
-        <p style="font-family: monospace; color: var(--text-main); margin-bottom: 0;">{{ result.error }}</p>
-    </div>
-    {% else %}
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-        <h2 style="margin: 0;">Результати</h2>
-        <div style="color: var(--text-muted); font-size: 0.9rem;">
-            Час виконання: <strong>{{"%.0f"|format(result.execution_time_ms)}} ms</strong>
-            | Знайдено рядків: <strong>{{ result.rows|length }}</strong>
-            {% if result.truncated %}
-            <span style="color: var(--warning); margin-left: 10px;">(Обрізано до 500 для стабільності)</span>
-            {% endif %}
-        </div>
-    </div>
+            <div class="query-row">
+                <div class="actions-inline">
+                    <button type="submit" class="btn primary">Виконати ▶</button>
+                    <a href="/query" class="btn">Очистити</a>
+                </div>
+                <div class="query-examples">
+                    <span class="text-muted" style="font-size:.82rem;">Швидкі приклади:</span>
+                    <button type="button" class="btn" style="padding:6px 9px; font-size:.78rem;" onclick="document.getElementById('query').value=&quot;SELECT * FROM pg_stat_activity WHERE state='active';&quot;">Active Queries</button>
+                    <button type="button" class="btn" style="padding:6px 9px; font-size:.78rem;" onclick="document.getElementById('query').value='SELECT * FROM messages ORDER BY message_id DESC LIMIT 10;'">Останні 10 повідомлень</button>
+                    <button type="button" class="btn" style="padding:6px 9px; font-size:.78rem;" onclick="document.getElementById('query').value='EXPLAIN SELECT * FROM users;'">EXPLAIN users</button>
+                </div>
+            </div>
+        </form>
+    </section>
 
-    {% if result.rows %}
-    <div class="table-container" style="overflow-x: auto;">
-        <table style="white-space: nowrap;">
-            <thead>
-                <tr>
-                    {% for col in result.columns %}
-                    <th>{{ col }}</th>
-                    {% endfor %}
-                </tr>
-            </thead>
-            <tbody>
-                {% for row in result.rows %}
-                <tr>
-                    {% for col in result.columns %}
-                    {% set val = row[col] %}
-                    {% if val is none %}
-                    <td style="color: var(--text-muted); font-style: italic;">NULL</td>
-                    {% elif val is number %}
-                    <td style="font-family: monospace; text-align: right; color: var(--accent);">{{ val }}</td>
-                    {% elif val is string and val|length > 100 %}
-                    <td title="{{ val }}">{{ val[:97] }}...</td>
-                    {% else %}
-                    <td style="max-width: 400px; overflow: hidden; text-overflow: ellipsis;">{{ val }}</td>
+    {% if result %}
+        {% if not result.success %}
+        <section class="card query-error stack-sm">
+            <h2 class="section-title" style="color:#ffb1b1;">Помилка виконання</h2>
+            <pre style="margin:0; white-space: pre-wrap;">{{ result.error }}</pre>
+        </section>
+        {% else %}
+        <section class="card stack-sm">
+            <div class="split">
+                <div>
+                    <h2 class="section-title" style="margin:0;">Результати</h2>
+                    <p class="section-subtitle">Виконання read-only запиту</p>
+                </div>
+                <div class="query-result-meta">
+                    <span class="pill">Час <strong>{{"%.0f"|format(result.execution_time_ms)}} ms</strong></span>
+                    <span class="pill">Рядків <strong>{{ result.rows|length }}</strong></span>
+                    {% if result.truncated %}
+                    <span class="pill" style="border-color: rgba(245,158,11,.22); background: rgba(245,158,11,.08); color:#ffd88a;">Обрізано до 500</span>
                     {% endif %}
-                    {% endfor %}
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-    {% else %}
-    <div class="card" style="text-align: center; color: var(--text-muted); padding: 40px;">
-        Запит виконано успішно, але не повернуто жодного рядка.
-    </div>
-    {% endif %}
+                </div>
+            </div>
 
+            {% if result.rows %}
+            <div class="table-container">
+                <table style="white-space: nowrap;">
+                    <thead>
+                        <tr>
+                            {% for col in result.columns %}
+                            <th>{{ col }}</th>
+                            {% endfor %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in result.rows %}
+                        <tr>
+                            {% for col in result.columns %}
+                            {% set val = row[col] %}
+                            {% if val is none %}
+                            <td class="null-cell">NULL</td>
+                            {% elif val is number %}
+                            <td class="mono text-right" style="color: var(--accent);">{{ val }}</td>
+                            {% elif val is string and val|length > 140 %}
+                            <td title="{{ val }}">{{ val[:137] }}...</td>
+                            {% else %}
+                            <td style="max-width: 440px; overflow: hidden; text-overflow: ellipsis;">{{ val }}</td>
+                            {% endif %}
+                            {% endfor %}
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="empty-state">Запит виконано успішно, але він не повернув жодного рядка.</div>
+            {% endif %}
+        </section>
+        {% endif %}
     {% endif %}
 </div>
-{% endif %}
 {% endblock %}

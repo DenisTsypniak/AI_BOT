@@ -3,41 +3,76 @@
 {% block title %}{{ title }} - Live Role Bot{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div>
-            <h1 class="page-title">{{ title }}</h1>
-            <p class="page-description">Детальний перегляд запису.</p>
-        </div>
-        <a href="{{ back_url }}" class="btn">← Повернутися</a>
-    </div>
-</div>
+<style>
+    .detail-grid {
+        display: grid;
+        gap: 8px;
+    }
+    .detail-row {
+        display: grid;
+        grid-template-columns: minmax(180px, 28%) 1fr;
+        gap: 0;
+        border: 1px solid rgba(148,163,184,.1);
+        border-radius: 12px;
+        overflow: hidden;
+        background: rgba(255,255,255,.012);
+    }
+    .detail-key {
+        padding: 12px 14px;
+        color: var(--text-muted);
+        font-weight: 700;
+        border-right: 1px solid rgba(148,163,184,.1);
+        background: rgba(8,13,24,.22);
+        word-break: break-word;
+    }
+    .detail-val {
+        padding: 12px 14px;
+        min-width: 0;
+    }
+    @media (max-width: 800px) {
+        .detail-row {
+            grid-template-columns: 1fr;
+        }
+        .detail-key {
+            border-right: none;
+            border-bottom: 1px solid rgba(148,163,184,.1);
+        }
+    }
+</style>
 
-<div class="card" style="padding: 20px;">
-    <table style="width: 100%; border-collapse: collapse;">
-        <tbody>
+<div class="stack">
+    <section class="page-header">
+        <div class="split">
+            <div>
+                <h1 class="page-title">{{ title }}</h1>
+                <p class="page-description">Детальний перегляд одного запису.</p>
+            </div>
+            <a href="{{ back_url }}" class="btn">← Повернутися</a>
+        </div>
+    </section>
+
+    <section class="card">
+        <div class="detail-grid">
             {% for key, val in data.items() %}
-            <tr style="border-bottom: 1px solid var(--border-color);">
-                <th
-                    style="text-align: left; padding: 12px 15px; width: 25%; color: var(--text-muted); background-color: rgba(255,255,255,0.02);">
-                    {{ key }}</th>
-                <td style="padding: 12px 15px;">
+            <div class="detail-row">
+                <div class="detail-key">{{ key }}</div>
+                <div class="detail-val">
                     {% if val is none %}
-                    <span style="color: var(--text-muted); font-style: italic;">NULL</span>
+                    <span class="text-muted" style="font-style: italic;">NULL</span>
                     {% elif 'time' in key or 'date' in key or 'created_at' in key or 'updated_at' in key %}
                     {{ val|kyiv_time('%Y-%m-%d %H:%M:%S', default=val) }}
                     {% elif val is number %}
-                    <span style="font-family: monospace; color: var(--accent);">{{ val }}</span>
+                    <span class="mono" style="color: var(--accent);">{{ val }}</span>
                     {% elif val is string and (val.startswith('{') or val.startswith('[')) %}
-                    <pre
-                        style="margin: 0; padding: 10px; background-color: var(--background-color); border-radius: 4px; font-family: monospace; font-size: 0.85rem; color: var(--accent); white-space: pre-wrap; max-height: 400px; overflow: auto;">{{ val|json_pretty }}</pre>
+                    <pre style="margin:0; max-height: 420px;">{{ val|json_pretty }}</pre>
                     {% else %}
-                    <div style="white-space: pre-wrap; word-break: break-word;">{{ val }}</div>
+                    <div class="text-wrap">{{ val }}</div>
                     {% endif %}
-                </td>
-            </tr>
+                </div>
+            </div>
             {% endfor %}
-        </tbody>
-    </table>
+        </div>
+    </section>
 </div>
 {% endblock %}
+

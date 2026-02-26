@@ -3,128 +3,173 @@
 {% block title %}Пам'ять - Live Role Bot{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1 class="page-title">Витягнута Пам'ять</h1>
-    <p class="page-description">Довгострокові факти та специфічні розмовні епізоди, витягнуті LLM.</p>
-    <div style="margin-top: 12px; display:flex; gap:10px; flex-wrap:wrap;">
-        <a href="/memory/provenance" class="btn primary">Походження Пам'яті (Provenance)</a>
-        <a href="/memory/extractor" class="btn">Діагностика Екстрактора</a>
-        <a href="/persona/card" class="btn">Картка Персони</a>
-        <a href="/persona/memory" class="btn">Пам'ять Персони</a>
-    </div>
-</div>
+<style>
+    .memory-nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+    }
+    .memory-section {
+        display: grid;
+        gap: 12px;
+    }
+    .memory-section + .memory-section {
+        margin-top: 6px;
+    }
+    .memory-heading {
+        display: flex;
+        justify-content: space-between;
+        align-items: end;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+    .memory-sub {
+        color: var(--text-muted);
+        font-size: .84rem;
+        margin: 0;
+    }
+    .fact-key {
+        font-family: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+        color: var(--accent);
+        font-size: .82rem;
+        word-break: break-word;
+    }
+    .importance-high { color: #f87171; }
+    .importance-mid { color: #fbbf24; }
+    .importance-low { color: #34d399; }
+</style>
 
-<h2 style="margin-top: 0;">Епізодична Пам'ять</h2>
-<div class="table-container">
-    <table>
-        <thead>
-            <tr>
-                <th style="width: 60px;">ID</th>
-                <th style="width: 200px;">Заголовок та Тема</th>
-                <th>Короткий зміст Епізоду</th>
-                <th style="width: 80px;">Статус</th>
-                <th style="width: 80px;">Важливість</th>
-                <th style="width: 120px;">Оновлено</th>
-                <th>Дії</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for ep in episodes %}
-            <tr>
-                <td style="color: var(--text-muted); font-size: 0.85rem;">#{{ ep.episode_id }}</td>
-                <td>
-                    <strong>{{ ep.title }}</strong>
-                    <div
-                        style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; text-transform: uppercase;">
-                        ТП: {{ ep.episode_type }}</div>
-                </td>
-                <td class="text-wrap" style="color: var(--text-muted); font-size: 0.9rem;">{{ ep.summary }}</td>
-                <td>
-                    {% if ep.status == 'confirmed' %}
-                    <span class="badge green">Підтверджено</span>
-                    {% elif ep.status == 'candidate' %}
-                    <span class="badge yellow">Кандидат</span>
-                    {% else %}
-                    <span class="badge">{{ ep.status }}</span>
-                    {% endif %}
-                </td>
-                <td>
-                    <div
-                        class="font-weight-bold {% if ep.importance > 0.7 %}text-red{% elif ep.importance > 0.4 %}text-yellow{% else %}text-green{% endif %}">
-                        {{"%.2f"|format(ep.importance)}}
-                    </div>
-                </td>
-                <td style="color: var(--text-muted); font-size: 0.85rem;">{{ ep.updated_at|kyiv_time }}</td>
-                <td>
-                    <a href="/memory/episodes/{{ ep.episode_id }}" class="btn"
-                        style="padding: 4px 8px; font-size: 0.8rem;">Дет.</a>
-                </td>
-            </tr>
-            {% else %}
-            <tr>
-                <td colspan="7" style="text-align: center; padding: 30px; color: var(--text-muted);">Епізодів
-                    ще не записано. Зростання персони може бути вимкнено або увімкнено shadow mode.</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</div>
+<div class="stack">
+    <section class="page-header">
+        <h1 class="page-title">🧠 Витягнута пам'ять</h1>
+        <p class="page-description">Довготривалі факти й епізоди, які система витягнула з розмов. Це операційний зріз пам'яті, а не повна сирий журнал.</p>
+        <div class="memory-nav">
+            <a href="/memory/provenance" class="btn primary">Походження пам'яті (Provenance)</a>
+            <a href="/memory/extractor" class="btn">Діагностика Extractor</a>
+            <a href="/persona/card" class="btn">Особистість Лізи</a>
+            <a href="/persona/memory" class="btn">Пам'ять персони</a>
+        </div>
+    </section>
 
-<h2 style="margin-top: 40px;">Факти Користувачів</h2>
-<div class="table-container">
-    <table>
-        <thead>
-            <tr>
-                <th style="width: 150px;">Користувач</th>
-                <th style="width: 120px;">Ключ Факту</th>
-                <th>Значення Факту</th>
-                <th style="width: 80px;">Статус</th>
-                <th style="width: 80px;">Важливість</th>
-                <th style="width: 120px;">Оновлено</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for fact in facts %}
-            <tr>
-                <td>
-                    <strong>{{ fact.discord_username or 'Невідомо' }}</strong>
-                    <div style="font-size: 0.75rem; color: var(--text-muted); font-family: monospace;">{{ fact.user_id
-                        }}</div>
-                </td>
-                <td><span class="badge"
-                        style="background-color: var(--surface-color); border: 1px solid var(--border-color);">{{
-                        fact.fact_key }}</span></td>
-                <td class="text-wrap" style="font-size: 0.95rem;">{{ fact.fact_value }}
-                    {% if fact.pinned %}
-                    <span title="Закріплений Факт" style="cursor: help;">📌</span>
-                    {% endif %}
-                </td>
-                <td>
-                    {% if fact.status == 'active' %}
-                    <span class="badge green">Активний</span>
-                    {% elif fact.status == 'recalled' %}
-                    <span class="badge blue">Згаданий</span>
+    <section class="memory-section">
+        <div class="memory-heading">
+            <div>
+                <h2 class="section-title">🎬 Епізодична пам'ять</h2>
+                <p class="memory-sub">Події та сцени, які можуть впливати на поведінку, summaries і long-term context.</p>
+            </div>
+            <span class="pill">Епізодів <strong>{{ episodes|length }}</strong></span>
+        </div>
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Заголовок / тип</th>
+                        <th>Короткий зміст</th>
+                        <th>Статус</th>
+                        <th>Важливість</th>
+                        <th>Оновлено</th>
+                        <th>Дії</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for ep in episodes %}
+                    <tr>
+                        <td class="mono text-muted">#{{ ep.episode_id }}</td>
+                        <td>
+                            <div class="stack-sm" style="gap:5px;">
+                                <strong>{{ ep.title }}</strong>
+                                <span class="badge">{{ ep.episode_type }}</span>
+                            </div>
+                        </td>
+                        <td class="text-wrap text-muted" style="font-size:.9rem; max-width: 520px;">{{ ep.summary }}</td>
+                        <td>
+                            {% if ep.status == 'confirmed' %}
+                            <span class="badge green">Підтверджено</span>
+                            {% elif ep.status == 'candidate' %}
+                            <span class="badge yellow">Кандидат</span>
+                            {% else %}
+                            <span class="badge">{{ ep.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="mono font-weight-bold {% if ep.importance > 0.7 %}importance-high{% elif ep.importance > 0.4 %}importance-mid{% else %}importance-low{% endif %}">
+                            {{"%.2f"|format(ep.importance)}}
+                        </td>
+                        <td class="text-muted" style="font-size:.84rem;">{{ ep.updated_at|kyiv_time }}</td>
+                        <td>
+                            <a href="/memory/episodes/{{ ep.episode_id }}" class="btn" style="padding:6px 10px; font-size:.82rem;">Деталі</a>
+                        </td>
+                    </tr>
                     {% else %}
-                    <span class="badge">{{ fact.status }}</span>
-                    {% endif %}
-                </td>
-                <td>
-                    <div
-                        class="font-weight-bold {% if fact.importance > 0.7 %}text-red{% elif fact.importance > 0.4 %}text-yellow{% else %}text-green{% endif %}">
-                        {{"%.2f"|format(fact.importance)}}
-                    </div>
-                </td>
-                <td style="color: var(--text-muted); font-size: 0.85rem;">{{ fact.updated_at|kyiv_time }}</td>
-            </tr>
-            {% else %}
-            <tr>
-                <td colspan="6" style="text-align: center; padding: 30px; color: var(--text-muted);">Фактів ще не
-                    витягнуто.
-                    Перевірте, чи активний модуль Mem0/Memory.</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+                    <tr>
+                        <td colspan="7"><div class="empty-state">Епізодів ще не записано.</div></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="memory-section">
+        <div class="memory-heading">
+            <div>
+                <h2 class="section-title">👤 Факти користувачів</h2>
+                <p class="memory-sub">Агреговані user facts, витягнуті з діалогів. Ці факти можуть потрапляти у картки користувачів і в prompt-пам'ять.</p>
+            </div>
+            <span class="pill">Фактів <strong>{{ facts|length }}</strong></span>
+        </div>
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Користувач</th>
+                        <th>Ключ факту</th>
+                        <th>Значення</th>
+                        <th>Статус</th>
+                        <th>Важливість</th>
+                        <th>Оновлено</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for fact in facts %}
+                    <tr>
+                        <td>
+                            <div class="stack-sm" style="gap:4px;">
+                                <strong>{{ fact.discord_username or 'Невідомо' }}</strong>
+                                <span class="mono text-muted" style="font-size:.76rem;">{{ fact.user_id }}</span>
+                            </div>
+                        </td>
+                        <td><div class="fact-key">{{ fact.fact_key }}</div></td>
+                        <td class="text-wrap" style="max-width: 420px;">
+                            {{ fact.fact_value }}
+                            {% if fact.pinned %}
+                            <span title="Закріплений факт" style="cursor: help;">📌</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if fact.status == 'active' %}
+                            <span class="badge green">Активний</span>
+                            {% elif fact.status == 'recalled' %}
+                            <span class="badge blue">Згаданий</span>
+                            {% else %}
+                            <span class="badge">{{ fact.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="mono font-weight-bold {% if fact.importance > 0.7 %}importance-high{% elif fact.importance > 0.4 %}importance-mid{% else %}importance-low{% endif %}">
+                            {{"%.2f"|format(fact.importance)}}
+                        </td>
+                        <td class="text-muted" style="font-size:.84rem;">{{ fact.updated_at|kyiv_time }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="6"><div class="empty-state">Факти ще не витягнуто.</div></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
 </div>
 {% endblock %}
 
