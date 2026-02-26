@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncpg
+import re
+import time
 
 
 async def get_dashboard_stats(pool: asyncpg.Pool) -> dict[str, int]:
@@ -303,9 +305,6 @@ async def get_table_rows(pool: asyncpg.Pool, table_name: str, limit: int = 50, o
         except Exception:
             return []
 
-import re
-import time
-
 async def execute_readonly_query(pool: asyncpg.Pool, query: str) -> dict:
     clean_query = query.strip()
     
@@ -391,3 +390,51 @@ async def execute_readonly_query(pool: asyncpg.Pool, query: str) -> dict:
                 "columns": [], "rows": []
             }
 
+
+async def delete_user(pool: asyncpg.Pool, guild_id: str, user_id: str) -> bool:
+    """Deletes a specific user and all their associated data."""
+    tables_guild_user = [
+        "stt_turns",
+        "user_facts", 
+        "dialogue_summaries",
+        "persona_relationships",
+        "persona_ingested_messages",
+        "persona_relationship_evidence",
+        "persona_user_memory_prefs",
+        "persona_episode_participants",
+        "messages"
+    ]
+    async with pool.acquire() as conn:
+        try:
+            async with conn.transaction():
+                for table in tables_guild_user:
+                    try:
+                        await conn.execute(f"DELETE FROM {table} WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
+                    except asyncpg.exceptions.UndefinedTableError:
+                        pass
+                
+                try:
+                    await conn.execute("DELETE FROM persona_episode_evidence WHERE user_id = $1", user_id)
+                except asyncpg.exceptions.UndefinedTableError:
+                    pass
+
+                result = await conn.execute("""
+                    DELETE FROM users
+                    WHERE guild_id = $1 AND user_id = $2
+                """, guild_id, user_id)
+            return result.startswith("DELETE") and not result.endswith(" 0")
+        except Exception as e:
+            print(f"Error executing complete delete: {e}")
+            return False
+
+async def delete_fact(pool: asyncpg.Pool, guild_id: str, user_id: str, fact_id: int) -> bool:
+    """Deletes a specific user fact."""
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.execute("""
+                DELETE FROM user_facts
+                WHERE guild_id = $1 AND user_id = $2 AND fact_id = $3
+            """, guild_id, user_id, fact_id)
+            return result.startswith("DELETE") and not result.endswith(" 0")
+        except Exception:
+            return False

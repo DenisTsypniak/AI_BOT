@@ -30,6 +30,9 @@ class MemorySchemaMixin:
 
     async def _reset_schema(self, db: aiosqlite.Connection) -> None:
         tables = (
+            "global_fact_evidence",
+            "global_user_facts",
+            "global_user_profiles",
             "conversation_messages",
             "guild_prompts",
             "guild_voice_settings",
@@ -69,6 +72,15 @@ class MemorySchemaMixin:
                 first_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (guild_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS global_user_profiles (
+                user_id TEXT PRIMARY KEY,
+                discord_username TEXT NOT NULL,
+                discord_global_name TEXT,
+                primary_display_name TEXT NOT NULL,
+                first_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS role_profiles (
@@ -151,6 +163,25 @@ class MemorySchemaMixin:
                 UNIQUE(guild_id, user_id, fact_key)
             );
 
+            CREATE TABLE IF NOT EXISTS global_user_facts (
+                global_fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                fact_key TEXT NOT NULL,
+                fact_value TEXT NOT NULL,
+                fact_type TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                importance REAL NOT NULL,
+                status TEXT NOT NULL,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                evidence_count INTEGER NOT NULL DEFAULT 1,
+                first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_source_guild_id TEXT,
+                last_source_message_id INTEGER,
+                UNIQUE(user_id, fact_key)
+            );
+
             CREATE TABLE IF NOT EXISTS fact_evidence (
                 evidence_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 fact_id INTEGER NOT NULL,
@@ -160,6 +191,18 @@ class MemorySchemaMixin:
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(fact_id) REFERENCES user_facts(fact_id) ON DELETE CASCADE,
                 FOREIGN KEY(message_id) REFERENCES messages(message_id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS global_fact_evidence (
+                global_evidence_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                global_fact_id INTEGER NOT NULL,
+                source_guild_id TEXT,
+                source_message_id INTEGER,
+                extractor TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(global_fact_id) REFERENCES global_user_facts(global_fact_id) ON DELETE CASCADE,
+                FOREIGN KEY(source_message_id) REFERENCES messages(message_id) ON DELETE SET NULL
             );
 
             CREATE TABLE IF NOT EXISTS dialogue_summaries (
@@ -185,6 +228,15 @@ class MemorySchemaMixin:
 
             CREATE INDEX IF NOT EXISTS idx_facts_lookup
             ON user_facts(guild_id, user_id, pinned DESC, confidence DESC, updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_global_users_updated
+            ON global_user_profiles(updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_global_facts_lookup
+            ON global_user_facts(user_id, pinned DESC, confidence DESC, updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_global_fact_evidence_lookup
+            ON global_fact_evidence(global_fact_id, created_at DESC);
 
             CREATE INDEX IF NOT EXISTS idx_summary_lookup
             ON dialogue_summaries(guild_id, user_id, channel_id);

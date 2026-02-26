@@ -6,9 +6,8 @@ from pathlib import Path
 
 import asyncpg
 from dotenv import load_dotenv
-import secrets
-from fastapi import FastAPI, Request, HTTPException, status
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 import json
@@ -130,6 +129,29 @@ async def user_detail(request: Request, guild_id: str, user_id: str):
     if not data:
         return HTMLResponse("User not found", status_code=404)
     return render(request, "user_detail.html", {"data": data, "user_id": user_id, "guild_id": guild_id})
+
+@app.post("/users/{guild_id}/{user_id}/delete")
+async def delete_user_route(guild_id: str, user_id: str):
+    if not app_state.pool:
+        return HTMLResponse("Database pool not initialized", status_code=500)
+    
+    deleted = await queries.delete_user(app_state.pool, guild_id, user_id)
+    if not deleted:
+        return HTMLResponse("Failed to delete user or user not found", status_code=400)
+    
+    # Use 303 See Other for redirecting after a POST
+    return RedirectResponse(url="/users", status_code=status.HTTP_303_SEE_OTHER)
+
+@app.post("/users/{guild_id}/{user_id}/facts/{fact_id}/delete")
+async def delete_fact_route(guild_id: str, user_id: str, fact_id: int):
+    if not app_state.pool:
+        return HTMLResponse("Database pool not initialized", status_code=500)
+    
+    deleted = await queries.delete_fact(app_state.pool, guild_id, user_id, fact_id)
+    if not deleted:
+        return HTMLResponse("Failed to delete fact or fact not found", status_code=400)
+    
+    return RedirectResponse(url=f"/users/{guild_id}/{user_id}", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @app.get("/messages", response_class=HTMLResponse)

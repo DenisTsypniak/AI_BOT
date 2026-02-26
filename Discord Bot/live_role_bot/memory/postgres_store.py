@@ -91,6 +91,7 @@ class PostgresMemoryStore:
                         )
                     await self._create_schema(conn)
                     await self._migrate_schema(conn, version)
+                    await self._backfill_global_user_memory_tables(conn)
                     if version != self.SCHEMA_VERSION:
                         await self._set_schema_version(conn, self.SCHEMA_VERSION)
             self._initialized = True
@@ -266,6 +267,85 @@ class PostgresMemoryStore:
 
             CREATE INDEX IF NOT EXISTS idx_persona_audit_lookup
             ON persona_audit_log(persona_id, created_at DESC);
+            """
+        )
+
+    async def _backfill_global_user_memory_tables(self, conn: "asyncpg.Connection") -> None:
+        # Idempotent backfill so existing per-guild memory becomes visible in global card tables.
+        await conn.execute(
+            """
+            INSERT INTO global_user_profiles (
+                user_id, discord_username, discord_global_name, primary_display_name, first_seen, updated_at
+            )
+            SELECT latest.user_id,
+                   latest.discord_username,
+                   latest.discord_global_name,
+                   COALESCE(NULLIF(latest.discord_global_name, ''), NULLIF(latest.discord_username, ''), 'unknown') AS primary_display_name,
+                   first_seen_map.first_seen,
+                   latest.updated_at
+            FROM (
+                SELECT DISTINCT ON (user_id)
+                    user_id, discord_username, discord_global_name, updated_at
+                FROM users
+                ORDER BY user_id, updated_at DESC
+            ) AS latest
+            JOIN (
+                SELECT user_id, MIN(first_seen) AS first_seen
+                FROM users
+                GROUP BY user_id
+            ) AS first_seen_map USING (user_id)
+            ON CONFLICT(user_id) DO UPDATE SET
+                discord_username = EXCLUDED.discord_username,
+                discord_global_name = COALESCE(EXCLUDED.discord_global_name, global_user_profiles.discord_global_name),
+                primary_display_name = COALESCE(EXCLUDED.discord_global_name, EXCLUDED.discord_username, global_user_profiles.primary_display_name),
+                updated_at = GREATEST(global_user_profiles.updated_at, EXCLUDED.updated_at)
+            """
+        )
+
+        await conn.execute(
+            """
+            WITH ranked AS (
+                SELECT uf.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY uf.user_id, uf.fact_key
+                           ORDER BY
+                               uf.pinned DESC,
+                               CASE uf.status
+                                   WHEN 'pinned' THEN 3
+                                   WHEN 'confirmed' THEN 2
+                                   ELSE 1
+                               END DESC,
+                               uf.importance DESC,
+                               uf.confidence DESC,
+                               uf.evidence_count DESC,
+                               uf.updated_at DESC
+                       ) AS rn
+                FROM user_facts uf
+            )
+            INSERT INTO global_user_facts (
+                user_id, fact_key, fact_value, fact_type, confidence, importance, status, pinned, evidence_count,
+                first_seen_at, updated_at, last_seen_at, last_source_guild_id, last_source_message_id
+            )
+            SELECT
+                r.user_id, r.fact_key, r.fact_value, r.fact_type, r.confidence, r.importance, r.status, r.pinned, r.evidence_count,
+                r.created_at, r.updated_at, r.last_seen_at, r.guild_id, NULL
+            FROM ranked r
+            WHERE r.rn = 1
+            ON CONFLICT(user_id, fact_key) DO UPDATE SET
+                fact_value = EXCLUDED.fact_value,
+                fact_type = EXCLUDED.fact_type,
+                confidence = GREATEST(global_user_facts.confidence * 0.9, EXCLUDED.confidence),
+                importance = GREATEST(global_user_facts.importance, EXCLUDED.importance),
+                status = CASE
+                    WHEN global_user_facts.pinned THEN 'pinned'
+                    WHEN global_user_facts.status = 'confirmed' OR EXCLUDED.status = 'confirmed' THEN 'confirmed'
+                    ELSE EXCLUDED.status
+                END,
+                pinned = (global_user_facts.pinned OR EXCLUDED.pinned),
+                evidence_count = GREATEST(global_user_facts.evidence_count, EXCLUDED.evidence_count),
+                updated_at = GREATEST(global_user_facts.updated_at, EXCLUDED.updated_at),
+                last_seen_at = GREATEST(global_user_facts.last_seen_at, EXCLUDED.last_seen_at),
+                last_source_guild_id = COALESCE(EXCLUDED.last_source_guild_id, global_user_facts.last_source_guild_id)
             """
         )
 
@@ -456,6 +536,9 @@ class PostgresMemoryStore:
 
     async def _reset_schema(self, conn: "asyncpg.Connection") -> None:
         tables = (
+            "global_fact_evidence",
+            "global_user_facts",
+            "global_user_profiles",
             "fact_evidence",
             "stt_turns",
             "messages",
@@ -503,6 +586,15 @@ class PostgresMemoryStore:
                 first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (guild_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS global_user_profiles (
+                user_id TEXT PRIMARY KEY,
+                discord_username TEXT NOT NULL,
+                discord_global_name TEXT,
+                primary_display_name TEXT NOT NULL,
+                first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
 
             CREATE TABLE IF NOT EXISTS role_profiles (
@@ -585,6 +677,25 @@ class PostgresMemoryStore:
                 UNIQUE(guild_id, user_id, fact_key)
             );
 
+            CREATE TABLE IF NOT EXISTS global_user_facts (
+                global_fact_id BIGSERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                fact_key TEXT NOT NULL,
+                fact_value TEXT NOT NULL,
+                fact_type TEXT NOT NULL,
+                confidence DOUBLE PRECISION NOT NULL,
+                importance DOUBLE PRECISION NOT NULL,
+                status TEXT NOT NULL,
+                pinned BOOLEAN NOT NULL DEFAULT FALSE,
+                evidence_count INTEGER NOT NULL DEFAULT 1,
+                first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_source_guild_id TEXT,
+                last_source_message_id BIGINT,
+                UNIQUE(user_id, fact_key)
+            );
+
             CREATE TABLE IF NOT EXISTS fact_evidence (
                 evidence_id BIGSERIAL PRIMARY KEY,
                 fact_id BIGINT NOT NULL,
@@ -594,6 +705,18 @@ class PostgresMemoryStore:
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 FOREIGN KEY(fact_id) REFERENCES user_facts(fact_id) ON DELETE CASCADE,
                 FOREIGN KEY(message_id) REFERENCES messages(message_id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS global_fact_evidence (
+                global_evidence_id BIGSERIAL PRIMARY KEY,
+                global_fact_id BIGINT NOT NULL,
+                source_guild_id TEXT,
+                source_message_id BIGINT,
+                extractor TEXT NOT NULL,
+                confidence DOUBLE PRECISION NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                FOREIGN KEY(global_fact_id) REFERENCES global_user_facts(global_fact_id) ON DELETE CASCADE,
+                FOREIGN KEY(source_message_id) REFERENCES messages(message_id) ON DELETE SET NULL
             );
 
             CREATE TABLE IF NOT EXISTS dialogue_summaries (
@@ -620,6 +743,15 @@ class PostgresMemoryStore:
             CREATE INDEX IF NOT EXISTS idx_facts_lookup
             ON user_facts(guild_id, user_id, pinned DESC, confidence DESC, updated_at DESC);
 
+            CREATE INDEX IF NOT EXISTS idx_global_users_updated
+            ON global_user_profiles(updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_global_facts_lookup
+            ON global_user_facts(user_id, pinned DESC, confidence DESC, updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_global_fact_evidence_lookup
+            ON global_fact_evidence(global_fact_id, created_at DESC);
+
             CREATE INDEX IF NOT EXISTS idx_summary_lookup
             ON dialogue_summaries(guild_id, user_id, channel_id);
 
@@ -637,28 +769,47 @@ class PostgresMemoryStore:
         guild_nick: str | None,
         combined_label: str,
     ) -> None:
+        primary_display_name = (discord_global_name or discord_username or "unknown").strip() or "unknown"
         pool = await self._ensure_pool()
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO users (
-                    guild_id, user_id, discord_username, discord_global_name, guild_nick, combined_label, first_seen, updated_at
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO users (
+                        guild_id, user_id, discord_username, discord_global_name, guild_nick, combined_label, first_seen, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+                    ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                        discord_username = EXCLUDED.discord_username,
+                        discord_global_name = EXCLUDED.discord_global_name,
+                        guild_nick = EXCLUDED.guild_nick,
+                        combined_label = EXCLUDED.combined_label,
+                        updated_at = NOW()
+                    """,
+                    guild_id,
+                    user_id,
+                    discord_username,
+                    discord_global_name,
+                    guild_nick,
+                    combined_label,
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
-                ON CONFLICT(guild_id, user_id) DO UPDATE SET
-                    discord_username = EXCLUDED.discord_username,
-                    discord_global_name = EXCLUDED.discord_global_name,
-                    guild_nick = EXCLUDED.guild_nick,
-                    combined_label = EXCLUDED.combined_label,
-                    updated_at = NOW()
-                """,
-                guild_id,
-                user_id,
-                discord_username,
-                discord_global_name,
-                guild_nick,
-                combined_label,
-            )
+                await conn.execute(
+                    """
+                    INSERT INTO global_user_profiles (
+                        user_id, discord_username, discord_global_name, primary_display_name, first_seen, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4, NOW(), NOW())
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        discord_username = EXCLUDED.discord_username,
+                        discord_global_name = COALESCE(EXCLUDED.discord_global_name, global_user_profiles.discord_global_name),
+                        primary_display_name = COALESCE(EXCLUDED.discord_global_name, EXCLUDED.discord_username, global_user_profiles.primary_display_name),
+                        updated_at = NOW()
+                    """,
+                    user_id,
+                    discord_username,
+                    discord_global_name,
+                    primary_display_name,
+                )
 
     async def get_user_identity(self, guild_id: str, user_id: str) -> Optional[Dict[str, str | None]]:
         pool = await self._ensure_pool()
@@ -672,6 +823,68 @@ class PostgresMemoryStore:
                 guild_id,
                 user_id,
             )
+        if row is None:
+            return None
+        return {
+            "guild_id": str(row["guild_id"]),
+            "user_id": str(row["user_id"]),
+            "discord_username": str(row["discord_username"]),
+            "discord_global_name": row["discord_global_name"],
+            "guild_nick": row["guild_nick"],
+            "combined_label": str(row["combined_label"]),
+        }
+
+    async def get_latest_user_identity_by_user_id(
+        self,
+        user_id: str,
+        *,
+        exclude_guild_id: str | None = None,
+    ) -> Optional[Dict[str, str | None]]:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            global_row = await conn.fetchrow(
+                """
+                SELECT user_id, discord_username, discord_global_name, primary_display_name
+                FROM global_user_profiles
+                WHERE user_id = $1
+                """,
+                user_id,
+            )
+            if global_row is not None:
+                primary_display = str(global_row["primary_display_name"] or "").strip()
+                username = str(global_row["discord_username"] or "").strip()
+                return {
+                    "guild_id": "*",
+                    "user_id": str(global_row["user_id"]),
+                    "discord_username": username,
+                    "discord_global_name": global_row["discord_global_name"],
+                    "guild_nick": None,
+                    "combined_label": primary_display or username,
+                }
+            if exclude_guild_id:
+                row = await conn.fetchrow(
+                    """
+                    SELECT guild_id, user_id, discord_username, discord_global_name, guild_nick, combined_label
+                    FROM users
+                    WHERE user_id = $1
+                      AND guild_id <> $2
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    user_id,
+                    exclude_guild_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    SELECT guild_id, user_id, discord_username, discord_global_name, guild_nick, combined_label
+                    FROM users
+                    WHERE user_id = $1
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    user_id,
+                )
         if row is None:
             return None
         return {
@@ -940,6 +1153,49 @@ class PostgresMemoryStore:
             "updated_at": str(row["updated_at"]),
         }
 
+    async def get_latest_dialogue_summary_by_user_id(
+        self,
+        user_id: str,
+        *,
+        exclude_guild_id: str | None = None,
+    ) -> Optional[Dict[str, object]]:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            if exclude_guild_id:
+                row = await conn.fetchrow(
+                    """
+                    SELECT guild_id, channel_id, summary_text, source_user_messages, last_message_id, updated_at
+                    FROM dialogue_summaries
+                    WHERE user_id = $1
+                      AND guild_id <> $2
+                    ORDER BY updated_at DESC, source_user_messages DESC, last_message_id DESC
+                    LIMIT 1
+                    """,
+                    user_id,
+                    exclude_guild_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    SELECT guild_id, channel_id, summary_text, source_user_messages, last_message_id, updated_at
+                    FROM dialogue_summaries
+                    WHERE user_id = $1
+                    ORDER BY updated_at DESC, source_user_messages DESC, last_message_id DESC
+                    LIMIT 1
+                    """,
+                    user_id,
+                )
+        if row is None:
+            return None
+        return {
+            "guild_id": str(row["guild_id"]),
+            "channel_id": str(row["channel_id"]),
+            "summary_text": str(row["summary_text"]),
+            "source_user_messages": int(row["source_user_messages"]),
+            "last_message_id": int(row["last_message_id"] or 0),
+            "updated_at": str(row["updated_at"]),
+        }
+
     async def upsert_dialogue_summary(
         self,
         guild_id: str,
@@ -1120,6 +1376,100 @@ class PostgresMemoryStore:
                     conf,
                 )
 
+                global_row = await conn.fetchrow(
+                    """
+                    SELECT global_fact_id, confidence, importance, evidence_count, status, pinned
+                    FROM global_user_facts
+                    WHERE user_id = $1 AND fact_key = $2
+                    """,
+                    user_id,
+                    key,
+                )
+                if global_row is None:
+                    global_status = "confirmed" if conf >= 0.78 else "candidate"
+                    global_fact_id = await conn.fetchval(
+                        """
+                        INSERT INTO global_user_facts (
+                            user_id, fact_key, fact_value, fact_type,
+                            confidence, importance, status, pinned, evidence_count,
+                            first_seen_at, updated_at, last_seen_at,
+                            last_source_guild_id, last_source_message_id
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, 1, NOW(), NOW(), NOW(), $8, $9)
+                        RETURNING global_fact_id
+                        """,
+                        user_id,
+                        key,
+                        value[:280],
+                        fact_type_clean,
+                        conf,
+                        imp,
+                        global_status,
+                        guild_id,
+                        message_id,
+                    )
+                    global_fact_id = int(global_fact_id)
+                else:
+                    global_fact_id = int(global_row["global_fact_id"])
+                    g_prior_conf = float(global_row["confidence"])
+                    g_prior_imp = float(global_row["importance"])
+                    g_prior_count = int(global_row["evidence_count"])
+                    g_prior_status = str(global_row["status"])
+                    g_pinned = bool(global_row["pinned"])
+
+                    g_merged_conf = _clamp(max(g_prior_conf * 0.86, conf), 0.0, 1.0)
+                    g_merged_imp = _clamp(max(g_prior_imp, imp), 0.0, 1.0)
+                    g_merged_count = g_prior_count + 1
+
+                    if g_pinned:
+                        g_merged_status = "pinned"
+                    elif g_merged_count >= 2 or g_merged_conf >= 0.78:
+                        g_merged_status = "confirmed"
+                    elif g_prior_status == "confirmed":
+                        g_merged_status = "confirmed"
+                    else:
+                        g_merged_status = "candidate"
+
+                    await conn.execute(
+                        """
+                        UPDATE global_user_facts
+                        SET fact_value = $1,
+                            fact_type = $2,
+                            confidence = $3,
+                            importance = $4,
+                            status = $5,
+                            evidence_count = $6,
+                            updated_at = NOW(),
+                            last_seen_at = NOW(),
+                            last_source_guild_id = $7,
+                            last_source_message_id = $8
+                        WHERE global_fact_id = $9
+                        """,
+                        value[:280],
+                        fact_type_clean,
+                        g_merged_conf,
+                        g_merged_imp,
+                        g_merged_status,
+                        g_merged_count,
+                        guild_id,
+                        message_id,
+                        global_fact_id,
+                    )
+
+                await conn.execute(
+                    """
+                    INSERT INTO global_fact_evidence (
+                        global_fact_id, source_guild_id, source_message_id, extractor, confidence, created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, NOW())
+                    """,
+                    global_fact_id,
+                    guild_id,
+                    message_id,
+                    extractor,
+                    conf,
+                )
+
                 return fact_id
 
     async def get_user_facts(self, guild_id: str, user_id: str, limit: int) -> List[Dict[str, object]]:
@@ -1164,6 +1514,135 @@ class PostgresMemoryStore:
             }
             for row in rows
         ]
+
+    async def get_user_facts_global_by_user_id(
+        self,
+        user_id: str,
+        limit: int,
+        *,
+        exclude_guild_id: str | None = None,
+    ) -> List[Dict[str, object]]:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT global_fact_id, user_id, fact_key, fact_value, fact_type, confidence, importance,
+                       status, pinned, evidence_count, updated_at, last_seen_at, last_source_guild_id
+                FROM global_user_facts
+                WHERE user_id = $1
+                ORDER BY
+                    pinned DESC,
+                    CASE status
+                        WHEN 'pinned' THEN 3
+                        WHEN 'confirmed' THEN 2
+                        ELSE 1
+                    END DESC,
+                    importance DESC,
+                    confidence DESC,
+                    evidence_count DESC,
+                    updated_at DESC
+                LIMIT $2
+                """,
+                user_id,
+                max(1, int(limit)),
+            )
+
+        if rows:
+            return [
+                {
+                    "fact_id": int(row["global_fact_id"]),
+                    "guild_id": str(row["last_source_guild_id"] or ""),
+                    "fact_key": str(row["fact_key"]),
+                    "fact_value": str(row["fact_value"]),
+                    "fact_type": str(row["fact_type"]),
+                    "confidence": float(row["confidence"]),
+                    "importance": float(row["importance"]),
+                    "status": str(row["status"]),
+                    "pinned": bool(row["pinned"]),
+                    "evidence_count": int(row["evidence_count"]),
+                    "updated_at": str(row["updated_at"]),
+                    "last_seen_at": str(row["last_seen_at"]),
+                    "global": True,
+                }
+                for row in rows
+            ]
+
+        # Fallback to legacy per-guild aggregation if global tables are empty (migration warmup).
+        async with pool.acquire() as conn:
+            if exclude_guild_id:
+                rows = await conn.fetch(
+                    """
+                    SELECT fact_id, guild_id, fact_key, fact_value, fact_type, confidence, importance,
+                           status, pinned, evidence_count, updated_at, last_seen_at
+                    FROM user_facts
+                    WHERE user_id = $1
+                      AND guild_id <> $2
+                    ORDER BY
+                        pinned DESC,
+                        CASE status
+                            WHEN 'pinned' THEN 3
+                            WHEN 'confirmed' THEN 2
+                            ELSE 1
+                        END DESC,
+                        importance DESC,
+                        confidence DESC,
+                        evidence_count DESC,
+                        updated_at DESC
+                    LIMIT $3
+                    """,
+                    user_id,
+                    exclude_guild_id,
+                    max(1, int(limit) * 4),
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT fact_id, guild_id, fact_key, fact_value, fact_type, confidence, importance,
+                           status, pinned, evidence_count, updated_at, last_seen_at
+                    FROM user_facts
+                    WHERE user_id = $1
+                    ORDER BY
+                        pinned DESC,
+                        CASE status
+                            WHEN 'pinned' THEN 3
+                            WHEN 'confirmed' THEN 2
+                            ELSE 1
+                        END DESC,
+                        importance DESC,
+                        confidence DESC,
+                        evidence_count DESC,
+                        updated_at DESC
+                    LIMIT $2
+                    """,
+                    user_id,
+                    max(1, int(limit) * 4),
+                )
+        deduped: list[Dict[str, object]] = []
+        seen_keys: set[str] = set()
+        for row in rows:
+            fact_key = str(row["fact_key"])
+            if not fact_key or fact_key in seen_keys:
+                continue
+            seen_keys.add(fact_key)
+            deduped.append(
+                {
+                    "fact_id": int(row["fact_id"]),
+                    "guild_id": str(row["guild_id"]),
+                    "fact_key": fact_key,
+                    "fact_value": str(row["fact_value"]),
+                    "fact_type": str(row["fact_type"]),
+                    "confidence": float(row["confidence"]),
+                    "importance": float(row["importance"]),
+                    "status": str(row["status"]),
+                    "pinned": bool(row["pinned"]),
+                    "evidence_count": int(row["evidence_count"]),
+                    "updated_at": str(row["updated_at"]),
+                    "last_seen_at": str(row["last_seen_at"]),
+                }
+            )
+            if len(deduped) >= max(1, int(limit)):
+                break
+        return deduped
 
     async def ensure_persona_mvp_bootstrap(
         self,

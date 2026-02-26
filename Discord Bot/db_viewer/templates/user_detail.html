@@ -10,7 +10,16 @@
                     style="font-size: 1rem; color: var(--text-muted);">({{ data.user.combined_label }})</span></h1>
             <p class="page-description">Guild ID: {{ guild_id }} | User ID: {{ user_id }}</p>
         </div>
-        <a href="/users" class="btn">← Назад до списку</a>
+        <div style="display: flex; gap: 10px; align-items: center;">
+            <form action="/users/{{ guild_id }}/{{ user_id }}/delete" method="POST"
+                onsubmit="return confirm('Ви впевнені, що хочете видалити користувача {{ data.user.discord_username or user_id }}?');"
+                style="margin: 0;">
+                <button type="submit" class="btn"
+                    style="background-color: var(--danger, #dc2626); color: white; border: none;">Видалити
+                    користувача</button>
+            </form>
+            <a href="/users" class="btn">← Назад до списку</a>
+        </div>
     </div>
 </div>
 
@@ -39,6 +48,7 @@
                         <th>Ключ</th>
                         <th>Значення</th>
                         <th>Важливість</th>
+                        <th>Дії</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -48,10 +58,19 @@
                         <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;"
                             title="{{ fact.fact_value }}">{{ fact.fact_value }}</td>
                         <td>{{ fact.importance }}</td>
+                        <td>
+                            <form action="/users/{{ guild_id }}/{{ user_id }}/facts/{{ fact.fact_id }}/delete"
+                                method="POST"
+                                onsubmit="return confirm('Ви впевнені, що хочете видалити факт `{{ fact.fact_key }}`?');"
+                                style="margin: 0;">
+                                <button type="submit" class="btn"
+                                    style="padding: 2px 6px; font-size: 0.7rem; background-color: var(--danger, #dc2626); color: white; border: none;">Вид.</button>
+                            </form>
+                        </td>
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="3" style="text-align: center; color: var(--text-muted);">Жодного факту не знайдено.
+                        <td colspan="4" style="text-align: center; color: var(--text-muted);">Жодного факту не знайдено.
                         </td>
                     </tr>
                     {% endfor %}

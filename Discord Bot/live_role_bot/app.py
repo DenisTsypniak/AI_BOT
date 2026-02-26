@@ -34,15 +34,33 @@ from .services.local_stt import LocalSTT
 logger = logging.getLogger("live_role_bot")
 
 
+class _DropNoisyRootMessages(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - simple log filter
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        if "ignoring text stream with topic" in msg and "no callback attached" in msg:
+            return False
+        return True
+
+
 def configure_logging() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
+    root_logger = logging.getLogger()
+    has_noise_filter = any(isinstance(f, _DropNoisyRootMessages) for f in getattr(root_logger, "filters", []))
+    if not has_noise_filter:
+        root_logger.addFilter(_DropNoisyRootMessages())
     logging.getLogger("discord.ext.voice_recv.reader").setLevel(logging.WARNING)
     logging.getLogger("discord.ext.voice_recv.gateway").setLevel(logging.WARNING)
     logging.getLogger("discord.ext.voice_recv.opus").setLevel(logging.ERROR)
     logging.getLogger("faster_whisper").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
 
 def _is_tty(stream: object) -> bool:

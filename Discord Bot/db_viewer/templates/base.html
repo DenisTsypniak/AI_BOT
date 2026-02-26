@@ -382,6 +382,12 @@
 
         // Auto Refresh
         let refreshInterval;
+        let countdown = 30;
+
+        function updateRefreshButton() {
+            document.getElementById('toggleRefresh').innerText = `🔄 Авто-оновлення: Увімк (${countdown}с)`;
+        }
+
         function toggleAutoRefresh() {
             const isEnabled = localStorage.getItem('autoRefresh') === 'true';
             if (isEnabled) {
@@ -390,15 +396,24 @@
                 document.getElementById('toggleRefresh').innerText = '🔄 Авто-оновлення: Вимк';
             } else {
                 localStorage.setItem('autoRefresh', 'true');
+                countdown = 30;
                 setupAutoRefresh();
             }
         }
+
         function setupAutoRefresh() {
-            document.getElementById('toggleRefresh').innerText = '🔄 Авто-оновлення: Увімк (30с)';
+            updateRefreshButton();
             refreshInterval = setInterval(() => {
-                window.location.reload();
-            }, 30000);
+                countdown--;
+                if (countdown <= 0) {
+                    clearInterval(refreshInterval);
+                    window.location.reload();
+                } else {
+                    updateRefreshButton();
+                }
+            }, 1000);
         }
+
         if (localStorage.getItem('autoRefresh') === 'true') {
             setupAutoRefresh();
         }

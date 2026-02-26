@@ -43,12 +43,30 @@ from .observability import HealthHeartbeat, LiveKitRuntimeHealth
 logger = logging.getLogger("live_role_bot.livekit")
 
 
+class _DropNoisyRootMessages(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - simple log filter
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        if "ignoring text stream with topic" in msg and "no callback attached" in msg:
+            return False
+        return True
+
+
 def configure_logging() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
+    root_logger = logging.getLogger()
+    has_noise_filter = any(isinstance(f, _DropNoisyRootMessages) for f in getattr(root_logger, "filters", []))
+    if not has_noise_filter:
+        root_logger.addFilter(_DropNoisyRootMessages())
     logging.getLogger("livekit").setLevel(logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
 
 @dataclass(slots=True)
@@ -243,7 +261,7 @@ def _context_payload(packet: dict[str, Any] | None) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _resolve_voice_memory_focus(packet: dict[str, Any] | None) -> dict[str, str]:
+def _resolve_voice_memory_focuses(packet: dict[str, Any] | None, *, max_users: int = 3) -> list[dict[str, str]]:
     payload = _context_payload(packet)
     guild_obj = payload.get("guild", {}) if isinstance(payload.get("guild"), dict) else {}
     text_obj = payload.get("text_channel", {}) if isinstance(payload.get("text_channel"), dict) else {}
@@ -254,42 +272,84 @@ def _resolve_voice_memory_focus(packet: dict[str, Any] | None) -> dict[str, str]
     guild_id = str(guild_obj.get("id") or packet.get("guild_id") or "").strip() if isinstance(packet, dict) else ""
     channel_id = str(text_obj.get("id") or packet.get("text_channel_id") or "").strip() if isinstance(packet, dict) else ""
     preferred_user_id = str(bridge_obj.get("last_ingress_user_id") or "").strip()
+    preferred_label = _trim_runtime_text(bridge_obj.get("last_ingress_user_label") or "", 40)
 
-    focus_member: dict[str, Any] | None = None
+    ordered_members: list[dict[str, Any]] = []
+    seen_user_ids: set[str] = set()
+
+    def _push_member(item: dict[str, Any] | None) -> None:
+        if not isinstance(item, dict):
+            return
+        if bool(item.get("bot")):
+            return
+        user_id = str(item.get("user_id") or "").strip()
+        if not user_id or user_id in seen_user_ids:
+            return
+        ordered_members.append(item)
+        seen_user_ids.add(user_id)
+
     if preferred_user_id:
         for item in members:
             if not isinstance(item, dict):
                 continue
             if str(item.get("user_id") or "").strip() == preferred_user_id:
-                focus_member = item
-                break
-    if focus_member is None:
-        for item in members:
-            if not isinstance(item, dict):
-                continue
-            if bool(item.get("bot")):
-                continue
-            user_id = str(item.get("user_id") or "").strip()
-            if user_id:
-                focus_member = item
+                _push_member(item)
                 break
 
-    user_id = str((focus_member or {}).get("user_id") or preferred_user_id or "").strip()
-    label = _trim_runtime_text((focus_member or {}).get("display_name") or bridge_obj.get("last_ingress_user_label") or "", 40)
-    return {
-        "guild_id": guild_id,
-        "channel_id": channel_id,
-        "user_id": user_id,
-        "label": label,
-    }
+    for item in members:
+        _push_member(item if isinstance(item, dict) else None)
+        if len(ordered_members) >= max(1, int(max_users)):
+            break
+
+    focuses: list[dict[str, str]] = []
+    for item in ordered_members[: max(1, int(max_users))]:
+        user_id = str(item.get("user_id") or "").strip()
+        label = _trim_runtime_text(item.get("display_name") or "", 40)
+        focuses.append(
+            {
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "label": label,
+            }
+        )
+
+    # Fallback when participant snapshot is sparse but bridge knows the last ingress speaker.
+    if not focuses and preferred_user_id:
+        focuses.append(
+            {
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "user_id": preferred_user_id,
+                "label": preferred_label,
+            }
+        )
+    return focuses
 
 
 def _select_voice_memory_facts(base_settings: Settings, facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not facts:
         return []
+    def _priority(fact: dict[str, Any]) -> tuple[int, float, float]:
+        try:
+            fact_type = str(fact.get("fact_type") or "")
+            status = str(fact.get("status") or "")
+            confidence = float(fact.get("confidence") or 0.0)
+            importance = float(fact.get("importance") or 0.0)
+        except Exception:
+            return (0, 0.0, 0.0)
+        tier = 0
+        if fact_type == "identity":
+            tier = 3
+        elif fact_type == "preference":
+            tier = 2
+        elif status == "confirmed":
+            tier = 1
+        return (tier, confidence, importance)
+
     keep: list[dict[str, Any]] = []
     limit = max(2, min(6, int(getattr(base_settings, "memory_fact_top_k", 4) or 4)))
-    for fact in facts:
+    for fact in sorted(facts, key=_priority, reverse=True):
         try:
             fact_type = str(fact.get("fact_type") or "")
             confidence = float(fact.get("confidence") or 0.0)
@@ -306,6 +366,135 @@ def _select_voice_memory_facts(base_settings: Settings, facts: list[dict[str, An
         if len(keep) >= limit:
             break
     return keep
+
+
+def _merge_voice_memory_fact_rows(
+    primary: list[dict[str, Any]],
+    fallback: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for fact in [*(primary or []), *(fallback or [])]:
+        if not isinstance(fact, dict):
+            continue
+        fact_key = str(fact.get("fact_key") or "").strip().casefold()
+        fact_value = str(fact.get("fact_value") or "").strip()
+        dedupe_key = fact_key or fact_value.casefold()
+        if not dedupe_key or dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        merged.append(fact)
+        if len(merged) >= max(1, int(limit)):
+            break
+    return merged
+
+
+def _voice_has_identity_fact(facts: list[dict[str, Any]]) -> bool:
+    for fact in facts or []:
+        if not isinstance(fact, dict):
+            continue
+        fact_key = str(fact.get("fact_key") or "").strip().casefold()
+        fact_type = str(fact.get("fact_type") or "").strip().casefold()
+        if fact_type == "identity" or fact_key.startswith("identity:"):
+            return True
+    return False
+
+
+async def _get_voice_identity_fallback_fact(
+    memory_store: Any,
+    *,
+    guild_id: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    getter = getattr(memory_store, "get_latest_user_identity_by_user_id", None)
+    if not callable(getter):
+        return None
+    identity = None
+    with contextlib.suppress(Exception):
+        identity = await getter(user_id, exclude_guild_id=guild_id)
+    if not identity:
+        return None
+    primary_name = str(identity.get("discord_global_name") or "").strip() or str(identity.get("discord_username") or "").strip()
+    username = str(identity.get("discord_username") or "").strip()
+    if not (primary_name or username):
+        return None
+    value = primary_name or username
+    return {
+        "fact_key": "identity:discord_primary_name",
+        "fact_value": value,
+        "fact_type": "identity",
+        "confidence": 0.98,
+        "importance": 0.9,
+        "status": "confirmed",
+        "pinned": False,
+        "evidence_count": 1,
+    }
+
+
+async def _get_voice_summary_with_global_fallback(
+    memory_store: Any,
+    *,
+    guild_id: str,
+    user_id: str,
+    channel_id: str,
+) -> dict[str, Any] | None:
+    summary_row = await memory_store.get_dialogue_summary(guild_id, user_id, channel_id)
+    if summary_row is not None and str(summary_row.get("summary_text") or "").strip():
+        return summary_row
+    getter = getattr(memory_store, "get_latest_dialogue_summary_by_user_id", None)
+    if not callable(getter):
+        return summary_row
+    with contextlib.suppress(Exception):
+        global_row = await getter(user_id, exclude_guild_id=guild_id)
+        if global_row is not None and str(global_row.get("summary_text") or "").strip():
+            return global_row
+    return summary_row
+
+
+async def _get_voice_facts_with_global_fallback(
+    memory_store: Any,
+    *,
+    guild_id: str,
+    user_id: str,
+    limit: int,
+    target_count: int,
+) -> list[dict[str, Any]]:
+    local_facts = await memory_store.get_user_facts(guild_id, user_id, limit=max(1, int(limit)))
+    getter = getattr(memory_store, "get_user_facts_global_by_user_id", None)
+    if not callable(getter):
+        merged = list(local_facts)
+        if not _voice_has_identity_fact(merged):
+            identity_fact = await _get_voice_identity_fallback_fact(
+                memory_store,
+                guild_id=guild_id,
+                user_id=user_id,
+            )
+            if identity_fact:
+                merged = _merge_voice_memory_fact_rows([identity_fact], merged, limit=max(limit, target_count))
+        return merged
+    global_facts: list[dict[str, Any]] = []
+    with contextlib.suppress(Exception):
+        global_facts = await getter(
+            user_id,
+            limit=max(1, int(max(limit, target_count))),
+            exclude_guild_id=guild_id,
+        )
+    merged = _merge_voice_memory_fact_rows(
+        local_facts,
+        global_facts,
+        limit=max(limit, target_count),
+    )
+    if not _voice_has_identity_fact(merged):
+        identity_fact = await _get_voice_identity_fallback_fact(
+            memory_store,
+            guild_id=guild_id,
+            user_id=user_id,
+        )
+        if identity_fact:
+            merged = _merge_voice_memory_fact_rows([identity_fact], merged, limit=max(limit, target_count))
+    return merged
 
 
 def _recent_user_line_score(text: str) -> float:
@@ -482,63 +671,100 @@ async def _build_voice_memory_overlay_block(
     if memory_store is None or not bool(getattr(base_settings, "memory_enabled", True)):
         runtime_ctx.memory_updates_ignored += 1
         return ""
-    focus = _resolve_voice_memory_focus(packet)
-    guild_id = focus.get("guild_id", "")
-    channel_id = focus.get("channel_id", "")
-    user_id = focus.get("user_id", "")
-    if not (guild_id and channel_id and user_id):
+    focuses = _resolve_voice_memory_focuses(packet, max_users=3)
+    if not focuses:
+        runtime_ctx.memory_updates_ignored += 1
+        return ""
+    guild_id = str(focuses[0].get("guild_id") or "").strip()
+    channel_id = str(focuses[0].get("channel_id") or "").strip()
+    if not (guild_id and channel_id):
+        runtime_ctx.memory_updates_ignored += 1
+        return ""
+    focus_user_ids = [str(item.get("user_id") or "").strip() for item in focuses if str(item.get("user_id") or "").strip()]
+    if not focus_user_ids:
         runtime_ctx.memory_updates_ignored += 1
         return ""
 
-    cache_key = f"{guild_id}:{channel_id}:{user_id}"
+    cache_key = f"{guild_id}:{channel_id}:{','.join(focus_user_ids[:3])}"
     now = time.monotonic()
     if cache.get("key") == cache_key and (now - float(cache.get("fetched_at", 0.0) or 0.0)) < 8.0:
         block = str(cache.get("block") or "")
         if block:
-            runtime_ctx.last_memory_focus_user_id = user_id
-            runtime_ctx.last_memory_focus_label = focus.get("label", "")
+            runtime_ctx.last_memory_focus_user_id = focus_user_ids[0]
+            runtime_ctx.last_memory_focus_label = str(focuses[0].get("label") or "")
         else:
             runtime_ctx.memory_updates_ignored += 1
         return block
 
     try:
-        summary_row = await memory_store.get_dialogue_summary(guild_id, user_id, channel_id)
-        raw_facts = await memory_store.get_user_facts(guild_id, user_id, limit=8)
-        recent_rows: list[dict[str, Any]] = []
-        get_recent_dialogue_messages = getattr(memory_store, "get_recent_dialogue_messages", None)
-        if callable(get_recent_dialogue_messages):
-            with contextlib.suppress(Exception):
-                # Fetch deeper history so explicit "remember this" user statements survive beyond a few turns.
-                recent_rows = await get_recent_dialogue_messages(guild_id, channel_id, user_id, 48)
-        facts = _select_voice_memory_facts(base_settings, raw_facts)
-        recent_candidates = _select_recent_user_memory_candidates(recent_rows, limit=3)
-        recent_user_lines = [str(item.get("text") or "") for item in recent_candidates if str(item.get("text") or "").strip()]
-        await _maybe_backfill_facts_from_recent_candidates(
-            memory_store=memory_store,
-            extractor=extractor,
-            runtime_ctx=runtime_ctx,
-            room_name=room_name,
-            guild_id=guild_id,
-            user_id=user_id,
-            candidates=recent_candidates,
-            cache=cache,
-            preferred_language=base_settings.preferred_response_language,
-        )
-        summary_text = str((summary_row or {}).get("summary_text") or "").strip()
         lines = ["PERSISTED USER MEMORY (voice retrieval, lower priority than RP CANON):"]
-        label = focus.get("label", "")
-        if label or user_id:
-            lines.append(f"- likely_active_user: {label or '?'} ({_trim_runtime_text(user_id, 24)})")
-        if summary_text:
-            lines.append(build_user_dialogue_summary_line(_trim_runtime_text(summary_text, 260)))
-        if facts:
-            lines.append(build_relevant_facts_section(facts))
-        if recent_user_lines:
-            lines.append("Recent user statements (fresh, lower confidence than extracted facts):")
-            for line in recent_user_lines:
-                lines.append(f"- {_trim_runtime_text(line, 140)}")
+        get_recent_dialogue_messages = getattr(memory_store, "get_recent_dialogue_messages", None)
+        user_sections_added = 0
+        for idx, focus in enumerate(focuses[:3]):
+            user_id = str(focus.get("user_id") or "").strip()
+            label = str(focus.get("label") or "").strip()
+            if not user_id:
+                continue
+            summary_row = await _get_voice_summary_with_global_fallback(
+                memory_store,
+                guild_id=guild_id,
+                user_id=user_id,
+                channel_id=channel_id,
+            )
+            raw_facts = await _get_voice_facts_with_global_fallback(
+                memory_store,
+                guild_id=guild_id,
+                user_id=user_id,
+                limit=8,
+                target_count=4,
+            )
+            recent_rows: list[dict[str, Any]] = []
+            if callable(get_recent_dialogue_messages):
+                with contextlib.suppress(Exception):
+                    # Fetch deeper history so durable user preferences can be recalled across restarts.
+                    recent_rows = await get_recent_dialogue_messages(guild_id, channel_id, user_id, 48)
+
+            facts = _select_voice_memory_facts(base_settings, raw_facts)
+            recent_candidates = _select_recent_user_memory_candidates(recent_rows, limit=2 if idx == 0 else 1)
+            recent_user_lines = [
+                str(item.get("text") or "")
+                for item in recent_candidates
+                if str(item.get("text") or "").strip()
+            ]
+
+            # Opportunistic backfill only for the primary focus user to avoid excess extractor calls.
+            if idx == 0:
+                await _maybe_backfill_facts_from_recent_candidates(
+                    memory_store=memory_store,
+                    extractor=extractor,
+                    runtime_ctx=runtime_ctx,
+                    room_name=room_name,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    candidates=recent_candidates,
+                    cache=cache,
+                    preferred_language=base_settings.preferred_response_language,
+                )
+
+            summary_text = str((summary_row or {}).get("summary_text") or "").strip()
+            if not (summary_text or facts or recent_user_lines):
+                continue
+            user_sections_added += 1
+            lines.append(
+                f"- user[{user_sections_added}]: {(_trim_runtime_text(label, 32) or '?')} ({_trim_runtime_text(user_id, 24)})"
+            )
+            if summary_text:
+                lines.append(build_user_dialogue_summary_line(_trim_runtime_text(summary_text, 180)))
+            if facts:
+                # Keep per-user facts concise so multiple people fit in one runtime block.
+                lines.append(build_relevant_facts_section(facts[:3]))
+            if recent_user_lines:
+                lines.append("Recent user statements (fallback from messages):")
+                for line in recent_user_lines[: (2 if idx == 0 else 1)]:
+                    lines.append(f"- {_trim_runtime_text(line, 120)}")
+
         block = "\n".join(line for line in lines if line).strip()
-        if len(lines) <= 1:
+        if user_sections_added <= 0:
             block = ""
         if len(block) > max_chars:
             block = block[: max_chars - 3].rstrip() + "..."
@@ -546,8 +772,8 @@ async def _build_voice_memory_overlay_block(
         cache["fetched_at"] = now
         cache["block"] = block
         if block:
-            runtime_ctx.last_memory_focus_user_id = user_id
-            runtime_ctx.last_memory_focus_label = label
+            runtime_ctx.last_memory_focus_user_id = focus_user_ids[0]
+            runtime_ctx.last_memory_focus_label = str(focuses[0].get("label") or "")
             block_hash = hashlib.sha1(block.encode("utf-8", errors="ignore")).hexdigest()
             if block_hash != runtime_ctx.last_memory_hash:
                 runtime_ctx.memory_updates_applied += 1
@@ -555,11 +781,9 @@ async def _build_voice_memory_overlay_block(
             else:
                 runtime_ctx.memory_updates_ignored += 1
             logger.debug(
-                "[livekit.mem] room=%s user=%s summary=%s facts=%s chars=%s",
+                "[livekit.mem] room=%s users=%s chars=%s",
                 room_name,
-                user_id,
-                "yes" if bool(summary_text) else "no",
-                len(facts),
+                ",".join(focus_user_ids[:3]),
                 len(block),
             )
         else:
@@ -581,6 +805,26 @@ def _compose_livekit_instructions_with_runtime_context(base_instructions: str, r
     if not base:
         return block
     return f"{base}\n\n{block}".strip()
+
+
+def _bridge_snapshot_assistant_audio_busy(
+    packet: dict[str, Any] | None,
+    *,
+    idle_grace_sec: float = 0.9,
+) -> bool:
+    if not isinstance(packet, dict):
+        return False
+    payload = packet.get("payload", {}) if isinstance(packet.get("payload"), dict) else {}
+    bridge_obj = payload.get("bridge_runtime", {}) if isinstance(payload.get("bridge_runtime"), dict) else {}
+    if bool(bridge_obj.get("assistant_audio_active")):
+        return True
+    try:
+        last_unix = float(bridge_obj.get("assistant_audio_last_unix") or 0.0)
+    except Exception:
+        last_unix = 0.0
+    if last_unix <= 0:
+        return False
+    return (time.time() - last_unix) < max(0.0, float(idle_grace_sec))
 
 
 def _packet_topic(packet: object) -> str:
@@ -762,6 +1006,8 @@ async def _handle_session(ctx: Any) -> None:
     runtime_ctx_task: asyncio.Task[None] | None = None
     runtime_ctx_debounce_sec = max(0.25, min(2.0, float(lk_settings.bridge_context_min_interval_ms) / 2000.0))
     runtime_ctx_min_apply_sec = max(0.75, min(5.0, float(lk_settings.bridge_context_min_interval_ms) / 1000.0))
+    runtime_ctx_busy_retry_sec = max(0.35, min(1.25, runtime_ctx_debounce_sec))
+    runtime_ctx_idle_grace_sec = 0.9
     agent_instance: Any | None = None
     local_participant_identity = ""
     memory_store: Any | None = None
@@ -904,6 +1150,16 @@ async def _handle_session(ctx: Any) -> None:
                     continue
                 packet_obj = runtime_ctx.latest_packet
                 if not isinstance(packet_obj, dict):
+                    continue
+                if _bridge_snapshot_assistant_audio_busy(
+                    packet_obj,
+                    idle_grace_sec=runtime_ctx_idle_grace_sec,
+                ):
+                    # Context updates during active assistant speech can interrupt or truncate realtime TTS output.
+                    # Defer and retry after the current turn finishes (or a newer packet arrives).
+                    await asyncio.sleep(runtime_ctx_busy_retry_sec)
+                    if not runtime_ctx_event.is_set():
+                        runtime_ctx_event.set()
                     continue
                 runtime_ctx.last_applied_reason = str(packet_obj.get("reason") or runtime_ctx.last_received_reason or "")
                 runtime_block = _build_runtime_context_block(

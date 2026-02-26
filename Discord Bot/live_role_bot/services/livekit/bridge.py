@@ -142,6 +142,8 @@ class _BridgeSessionState:
     last_ingress_user_label: str = ""
     last_ingress_unix: float = 0.0
     seen_transcription_segment_ids: set[str] = field(default_factory=set)
+    assistant_audio_active: bool = False
+    last_assistant_audio_unix: float = 0.0
     context_sync_task: asyncio.Task[None] | None = None
     context_sync_seq: int = 0
     last_context_sent_at: float = 0.0
@@ -244,6 +246,8 @@ class LiveKitDiscordBridgeManager:
                     "dispatch_id": state.agent_dispatch_id or "",
                     "dispatch_owned": bool(state.agent_dispatch_owned),
                     "ingress_active": bool(state.discord_ingress_started_emitted),
+                    "assistant_audio_active": bool(state.assistant_audio_active),
+                    "assistant_audio_last_unix": float(state.last_assistant_audio_unix or 0.0),
                     "sender_task_alive": bool(state.sender_task is not None and not state.sender_task.done()),
                     "context_sync_task_alive": bool(
                         state.context_sync_task is not None and not state.context_sync_task.done()
@@ -704,6 +708,8 @@ class LiveKitDiscordBridgeManager:
             "bridge_runtime": {
                 "remote_streams": len(state.remote_tasks),
                 "ingress_active": bool(state.discord_ingress_started_emitted),
+                "assistant_audio_active": bool(state.assistant_audio_active),
+                "assistant_audio_last_unix": float(state.last_assistant_audio_unix or 0.0),
                 "dispatch_id": state.agent_dispatch_id or "",
                 "dispatch_owned": bool(state.agent_dispatch_owned),
                 "last_ingress_user_id": str(state.last_ingress_user_id or ""),
@@ -1222,6 +1228,9 @@ class LiveKitDiscordBridgeManager:
     ) -> None:
         stream = None
         try:
+            state.assistant_audio_active = True
+            state.last_assistant_audio_unix = float(time.time())
+            self._schedule_context_snapshot(state.guild_id, reason="assistant_audio_started", force=True)
             await self._emit_status(
                 state,
                 event="assistant_audio_stream_started",
@@ -1245,6 +1254,7 @@ class LiveKitDiscordBridgeManager:
                 pcm = self._livekit_frame_to_discord_pcm(frame)
                 if not pcm:
                     continue
+                state.last_assistant_audio_unix = float(time.time())
                 await self._play_discord_pcm(state, pcm)
                 if state.health is not None:
                     state.health.mark_activity()
@@ -1263,6 +1273,9 @@ class LiveKitDiscordBridgeManager:
                 with contextlib.suppress(Exception):
                     await stream.aclose()
             state.remote_tasks.pop(pub_sid, None)
+            state.assistant_audio_active = bool(state.remote_tasks)
+            state.last_assistant_audio_unix = float(time.time())
+            self._schedule_context_snapshot(state.guild_id, reason="assistant_audio_stopped", force=True)
             with contextlib.suppress(Exception):
                 await self._emit_status(
                     state,

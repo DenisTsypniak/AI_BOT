@@ -20,6 +20,77 @@ logger = logging.getLogger("live_role_bot")
 
 
 class VoiceMixin:
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        # Handle manual/admin moves of the bot between voice channels by re-binding the voice pipeline
+        # (Discord capture + LiveKit bridge/native audio) to the new channel.
+        me = self.user
+        if me is None or int(getattr(member, "id", 0) or 0) != int(getattr(me, "id", 0) or 0):
+            return
+
+        guild = getattr(member, "guild", None)
+        if guild is None:
+            return
+
+        before_channel = getattr(before, "channel", None)
+        after_channel = getattr(after, "channel", None)
+        before_id = int(getattr(before_channel, "id", 0) or 0)
+        after_id = int(getattr(after_channel, "id", 0) or 0)
+        if before_id == after_id:
+            return
+
+        # Ignore initial bot connect (join command path already creates the pipeline).
+        if before_channel is None and after_channel is not None:
+            return
+
+        # If bot was disconnected, clean up bridge/native sessions for this guild.
+        if after_channel is None:
+            logger.info("Bot voice state left channel in guild=%s; stopping voice sessions", guild.id)
+            with contextlib.suppress(Exception):
+                if getattr(self, "livekit_bridge", None) is not None:
+                    await self.livekit_bridge.stop_session(guild.id)
+            with contextlib.suppress(Exception):
+                if getattr(self, "native_audio", None) is not None:
+                    await self.native_audio.stop_session(guild.id)
+            with contextlib.suppress(Exception):
+                self.voice_text_channels.pop(guild.id, None)
+            return
+
+        text_channel_id = self.voice_text_channels.get(guild.id)
+        if not text_channel_id:
+            logger.info(
+                "Bot moved to voice channel=%s in guild=%s but no voice text binding exists; waiting for next !join",
+                after_id,
+                guild.id,
+            )
+            return
+
+        lock_key = f"voice-rebind:{guild.id}"
+        lock = getattr(self, "channel_locks", {}).get(lock_key) if hasattr(self, "channel_locks") else None
+        if lock is None:
+            # Fallback if channel_locks is not initialized for some reason.
+            logger.info(
+                "Bot moved voice channel in guild=%s %s->%s; re-binding voice pipeline (no lock)",
+                guild.id,
+                before_id or "-",
+                after_id,
+            )
+            await self._ensure_voice_capture(guild, member, int(text_channel_id))
+            return
+
+        async with lock:
+            logger.info(
+                "Bot moved voice channel in guild=%s %s->%s; re-binding voice pipeline",
+                guild.id,
+                before_id or "-",
+                after_id,
+            )
+            await self._ensure_voice_capture(guild, member, int(text_channel_id))
+
     async def _connect_or_move_voice_client(
         self,
         guild: discord.Guild,

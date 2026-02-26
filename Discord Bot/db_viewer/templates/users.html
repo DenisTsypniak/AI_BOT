@@ -38,9 +38,15 @@
                 <td style="text-align: right; font-family: monospace; color: var(--accent);">
                     {{ user.message_count }}
                 </td>
-                <td>
+                <td style="display: flex; gap: 5px;">
                     <a href="/users/{{ user.guild_id }}/{{ user.user_id }}" class="btn primary"
                         style="padding: 4px 8px; font-size: 0.8rem;">Деталі</a>
+                    <form action="/users/{{ user.guild_id }}/{{ user.user_id }}/delete" method="POST"
+                        onsubmit="return confirm('Ви впевнені, що хочете видалити користувача {{ user.discord_username or user.user_id }}? Це видалить всі пов\'язані дані!');"
+                        style="margin: 0;">
+                        <button type="submit" class="btn"
+                            style="padding: 4px 8px; font-size: 0.8rem; background-color: var(--danger, #dc2626); color: white; border: none;">Видалити</button>
+                    </form>
                 </td>
             </tr>
             {% else %}

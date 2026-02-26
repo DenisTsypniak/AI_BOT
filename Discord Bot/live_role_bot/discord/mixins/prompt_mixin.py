@@ -21,6 +21,128 @@ from ...prompts.dialogue import (
 
 
 class PromptMixin:
+    def _merge_memory_fact_lists(
+        self,
+        primary: list[dict[str, Any]],
+        fallback: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for fact in [*(primary or []), *(fallback or [])]:
+            if not isinstance(fact, dict):
+                continue
+            fact_key = str(fact.get("fact_key") or "").strip().casefold()
+            fact_value = str(fact.get("fact_value") or "").strip()
+            dedupe_key = fact_key or fact_value.casefold()
+            if not dedupe_key or dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            merged.append(fact)
+            if len(merged) >= max(1, int(limit)):
+                break
+        return merged
+
+    @staticmethod
+    def _has_identity_memory_fact(facts: list[dict[str, Any]]) -> bool:
+        for fact in facts or []:
+            if not isinstance(fact, dict):
+                continue
+            fact_key = str(fact.get("fact_key") or "").strip().casefold()
+            fact_type = str(fact.get("fact_type") or "").strip().casefold()
+            if fact_type == "identity" or fact_key.startswith("identity:"):
+                return True
+        return False
+
+    async def _get_global_identity_fallback_fact(
+        self,
+        guild_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        getter = getattr(self.memory, "get_latest_user_identity_by_user_id", None)
+        if not callable(getter):
+            return None
+        identity = None
+        with contextlib.suppress(Exception):
+            identity = await getter(user_id, exclude_guild_id=guild_id)
+        if not identity:
+            return None
+        primary_name = str(identity.get("discord_global_name") or "").strip() or str(
+            identity.get("discord_username") or ""
+        ).strip()
+        username = str(identity.get("discord_username") or "").strip()
+        if not (primary_name or username):
+            return None
+        value = primary_name or username
+        return {
+            "fact_key": "identity:discord_primary_name",
+            "fact_value": value,
+            "fact_type": "identity",
+            "confidence": 0.98,
+            "importance": 0.9,
+            "status": "confirmed",
+            "pinned": False,
+            "evidence_count": 1,
+        }
+
+    async def _get_summary_with_global_fallback(
+        self,
+        guild_id: str,
+        user_id: str,
+        channel_id: str,
+    ) -> dict[str, Any] | None:
+        summary_row = await self.memory.get_dialogue_summary(guild_id, user_id, channel_id)
+        if summary_row is not None and str(summary_row.get("summary_text") or "").strip():
+            return summary_row
+        getter = getattr(self.memory, "get_latest_dialogue_summary_by_user_id", None)
+        if not callable(getter):
+            return summary_row
+        with contextlib.suppress(Exception):
+            global_row = await getter(user_id, exclude_guild_id=guild_id)
+            if global_row is not None and str(global_row.get("summary_text") or "").strip():
+                return global_row
+        return summary_row
+
+    async def _get_user_facts_with_global_fallback(
+        self,
+        guild_id: str,
+        user_id: str,
+        *,
+        local_limit: int,
+        target_count: int,
+    ) -> list[dict[str, Any]]:
+        local_facts = await self.memory.get_user_facts(guild_id, user_id, limit=max(1, int(local_limit)))
+        getter = getattr(self.memory, "get_user_facts_global_by_user_id", None)
+        if not callable(getter):
+            merged = list(local_facts)
+            if not self._has_identity_memory_fact(merged):
+                fallback_identity = await self._get_global_identity_fallback_fact(guild_id, user_id)
+                if fallback_identity:
+                    merged = self._merge_memory_fact_lists(
+                        [fallback_identity],
+                        merged,
+                        limit=max(local_limit, target_count),
+                    )
+            return merged
+        global_facts: list[dict[str, Any]] = []
+        with contextlib.suppress(Exception):
+            global_facts = await getter(
+                user_id,
+                limit=max(1, int(max(local_limit, target_count))),
+                exclude_guild_id=guild_id,
+            )
+        merged = self._merge_memory_fact_lists(
+            local_facts,
+            global_facts,
+            limit=max(local_limit, target_count),
+        )
+        if not self._has_identity_memory_fact(merged):
+            fallback_identity = await self._get_global_identity_fallback_fact(guild_id, user_id)
+            if fallback_identity:
+                merged = self._merge_memory_fact_lists([fallback_identity], merged, limit=max(local_limit, target_count))
+        return merged
+
     def _build_session_state_block(self, channel_id: str) -> str:
         state = self.conversation_states.get(channel_id)
         if state is None:
@@ -109,7 +231,12 @@ class PromptMixin:
                 label = member.display_name
                 with contextlib.suppress(Exception):
                     label = await self._sync_member_identity(guild.id, member)
-                facts = await self.memory.get_user_facts(guild_key, str(member.id), limit=3)
+                facts = await self._get_user_facts_with_global_fallback(
+                    guild_key,
+                    str(member.id),
+                    local_limit=3,
+                    target_count=3,
+                )
                 fact_text = "; ".join(
                     str(item.get("fact_value") or "").strip()
                     for item in facts
@@ -158,7 +285,7 @@ class PromptMixin:
                 "constraints": self.settings.role_constraints,
             }
 
-        summary_row = await self.memory.get_dialogue_summary(guild_id, user_id, channel_id)
+        summary_row = await self._get_summary_with_global_fallback(guild_id, user_id, channel_id)
         summary_text = ""
         if self.settings.summary_enabled and summary_row is not None:
             summary_text = str(summary_row.get("summary_text") or "").strip()
@@ -225,7 +352,12 @@ class PromptMixin:
         if not self.settings.memory_enabled:
             return []
 
-        raw_facts = await self.memory.get_user_facts(guild_id, user_id, limit=48)
+        raw_facts = await self._get_user_facts_with_global_fallback(
+            guild_id,
+            user_id,
+            local_limit=48,
+            target_count=max(8, int(getattr(self.settings, "memory_fact_top_k", 4) or 4)),
+        )
         if not raw_facts:
             return []
 
@@ -236,6 +368,8 @@ class PromptMixin:
             fact_text = str(fact.get("fact_value") or "").strip()
             if not fact_text:
                 continue
+            fact_type = str(fact.get("fact_type") or "").strip().lower()
+            fact_key = str(fact.get("fact_key") or "").strip().lower()
             confidence = as_float(fact.get("confidence"), 0.0)
             importance = as_float(fact.get("importance"), 0.0)
             evidence = max(1, as_int(fact.get("evidence_count"), 1))
@@ -247,6 +381,10 @@ class PromptMixin:
                 base += 0.35
             if pinned:
                 base += 1.0
+            if fact_type == "identity" or fact_key.startswith("identity:"):
+                base += 0.65
+            elif fact_type == "preference":
+                base += 0.25
 
             fact_tokens = tokenize(fact_text)
             overlap = len(query_tokens.intersection(fact_tokens)) if query_tokens else 0
@@ -254,6 +392,8 @@ class PromptMixin:
                 base += (overlap / max(1.0, float(len(query_tokens)))) * 1.9
                 if overlap > 0:
                     base += 0.22
+                if ({"звати", "name"} & query_tokens) and (fact_type == "identity" or fact_key.startswith("identity:")):
+                    base += 1.25
 
             base -= index * 0.01
             scored.append((base, fact))
