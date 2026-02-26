@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import re
 import site
 import sys
 import json
@@ -33,7 +34,19 @@ from ...config import Settings
 from ...discord.common import collapse_spaces, load_rp_canon
 from ...memory.factory import build_memory_store
 from ...memory.extractor import MemoryExtractor
-from ...prompts.dialogue import build_relevant_facts_section, build_user_dialogue_summary_line
+from ...memory.fact_moderation import CandidateModerationInput, FactModerationPolicyV2
+from ...memory.storage.utils import (
+    normalize_memory_fact_about_target,
+    normalize_memory_fact_directness,
+    sanitize_memory_fact_evidence_quote,
+)
+from ...prompts.dialogue import (
+    build_persona_biography_summary_line,
+    build_persona_relevant_facts_section,
+    build_relevant_facts_section,
+    build_user_biography_summary_line,
+    build_user_dialogue_summary_line,
+)
 from ...prompts.voice import build_native_audio_system_instruction
 from ...services.gemini_client import GeminiClient
 from .bridge import DiscordLiveKitBridge, LiveKitBridgeConfig
@@ -118,6 +131,22 @@ class _BridgeRuntimeContextState:
     memory_backfill_attempts: int = 0
     memory_backfill_saved: int = 0
     memory_backfill_skipped: int = 0
+
+
+def _persona_memory_subject_user_id(base_settings: Settings) -> str:
+    persona_id = str(getattr(base_settings, "persona_id", "") or "persona").strip() or "persona"
+    return f"persona::{persona_id}"
+
+
+def _parse_bridge_room_guild_id(room_name: str, room_prefix: str) -> str:
+    room = str(room_name or "").strip()
+    prefix = str(room_prefix or "").strip()
+    if not room or not prefix:
+        return ""
+    match = re.match(rf"^{re.escape(prefix)}-g(\d+)-v\d+$", room)
+    if match is None:
+        return ""
+    return str(match.group(1) or "")
 
 
 def _build_prompt_context(base_settings: Settings, lk_settings: LiveKitAgentSettings) -> _PromptContext:
@@ -439,9 +468,12 @@ async def _get_voice_summary_with_global_fallback(
     guild_id: str,
     user_id: str,
     channel_id: str,
+    allow_cross_server_summary_fallback: bool = False,
 ) -> dict[str, Any] | None:
     summary_row = await memory_store.get_dialogue_summary(guild_id, user_id, channel_id)
     if summary_row is not None and str(summary_row.get("summary_text") or "").strip():
+        return summary_row
+    if not allow_cross_server_summary_fallback:
         return summary_row
     getter = getattr(memory_store, "get_latest_dialogue_summary_by_user_id", None)
     if not callable(getter):
@@ -451,6 +483,59 @@ async def _get_voice_summary_with_global_fallback(
         if global_row is not None and str(global_row.get("summary_text") or "").strip():
             return global_row
     return summary_row
+
+
+async def _get_voice_user_biography_summary(memory_store: Any, *, user_id: str) -> dict[str, Any] | None:
+    getter = getattr(memory_store, "get_global_user_biography_summary", None)
+    if callable(getter):
+        with contextlib.suppress(Exception):
+            row = await getter(user_id)
+            if row is not None and str(row.get("summary_text") or "").strip():
+                return row
+        return None
+    generic_getter = getattr(memory_store, "get_global_biography_summary", None)
+    if callable(generic_getter):
+        with contextlib.suppress(Exception):
+            row = await generic_getter("user", user_id)
+            if row is not None and str(row.get("summary_text") or "").strip():
+                return row
+    return None
+
+
+async def _get_voice_persona_biography_summary(memory_store: Any, *, persona_id: str) -> dict[str, Any] | None:
+    getter = getattr(memory_store, "get_persona_biography_summary", None)
+    if callable(getter):
+        with contextlib.suppress(Exception):
+            row = await getter(persona_id)
+            if row is not None and str(row.get("summary_text") or "").strip():
+                return row
+        return None
+    generic_getter = getattr(memory_store, "get_global_biography_summary", None)
+    if callable(generic_getter):
+        with contextlib.suppress(Exception):
+            row = await generic_getter("persona", persona_id)
+            if row is not None and str(row.get("summary_text") or "").strip():
+                return row
+    return None
+
+
+async def _get_voice_persona_self_facts(
+    memory_store: Any,
+    *,
+    persona_subject_user_id: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    getter = getattr(memory_store, "get_user_facts_global_by_user_id", None)
+    if callable(getter):
+        with contextlib.suppress(Exception):
+            rows = await getter(persona_subject_user_id, limit=max(1, int(limit)))
+            if isinstance(rows, list):
+                filtered = [
+                    row for row in rows
+                    if str((row or {}).get("about_target") or "assistant_self").strip().lower() in {"assistant_self", "unknown"}
+                ]
+                return filtered
+    return []
 
 
 async def _get_voice_facts_with_global_fallback(
@@ -657,6 +742,128 @@ async def _maybe_backfill_facts_from_recent_candidates(
             )
 
 
+async def _maybe_persist_persona_self_facts_from_agent_reply(
+    *,
+    memory_store: Any | None,
+    extractor: MemoryExtractor | None,
+    base_settings: Settings,
+    room_name: str,
+    guild_id: str,
+    reply_text: str,
+    dedupe_cache: dict[str, Any],
+) -> None:
+    if memory_store is None or extractor is None:
+        return
+    if not bool(getattr(base_settings, "memory_enabled", True)):
+        return
+    if not bool(getattr(base_settings, "memory_persona_self_facts_enabled", True)):
+        return
+
+    text = collapse_spaces(str(reply_text or ""))
+    if len(text) < 8:
+        return
+
+    seen_hashes = dedupe_cache.setdefault("persona_reply_hashes", [])
+    if not isinstance(seen_hashes, list):
+        seen_hashes = []
+        dedupe_cache["persona_reply_hashes"] = seen_hashes
+    text_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+    if text_hash in seen_hashes:
+        return
+
+    dry_run = bool(getattr(base_settings, "memory_extractor_dry_run_enabled", False))
+    moderation = FactModerationPolicyV2.from_settings(base_settings)
+    persona_subject_id = str(getattr(base_settings, "persona_id", "") or "persona").strip() or "persona"
+    persona_subject_user_id = _persona_memory_subject_user_id(base_settings)
+    facts_saved = 0
+    accepted = 0
+
+    try:
+        result = await extractor.extract_persona_self_facts(
+            assistant_text=text,
+            preferred_language=base_settings.preferred_response_language,
+            dialogue_context=None,
+        )
+    except Exception as exc:
+        logger.debug("[livekit.mem.persona] extractor failed room=%s: %s", room_name, exc)
+        return
+
+    facts = list(getattr(result, "facts", []) or [])
+    if not facts:
+        seen_hashes.append(text_hash)
+        dedupe_cache["persona_reply_hashes"] = seen_hashes[-64:]
+        return
+
+    for fact in facts:
+        value = str(getattr(fact, "value", "") or "").strip()
+        if not value:
+            continue
+        about_target = normalize_memory_fact_about_target(
+            str(getattr(fact, "about_target", "") or ""),
+            default="assistant_self",
+        )
+        if about_target == "self":
+            about_target = "assistant_self"
+        if about_target not in {"assistant_self", "unknown"}:
+            continue
+        directness = normalize_memory_fact_directness(str(getattr(fact, "directness", "") or ""), default="explicit")
+        evidence_quote = sanitize_memory_fact_evidence_quote(str(getattr(fact, "evidence_quote", "") or ""))
+        decision = moderation.evaluate(
+            CandidateModerationInput(
+                fact_key=str(getattr(fact, "key", "") or ""),
+                fact_value=value,
+                fact_type=str(getattr(fact, "fact_type", "fact") or "fact"),
+                about_target=about_target,
+                directness=directness,
+                confidence=float(getattr(fact, "confidence", 0.0) or 0.0),
+                importance=float(getattr(fact, "importance", 0.0) or 0.0),
+                evidence_quote=evidence_quote,
+                owner_kind="persona",
+                speaker_role="assistant",
+            )
+        )
+        if not decision.accepted:
+            continue
+        accepted += 1
+        if dry_run:
+            continue
+        with contextlib.suppress(Exception):
+            await memory_store.upsert_user_fact(
+                guild_id=guild_id or "livekit",
+                user_id=persona_subject_user_id,
+                fact_key=str(getattr(fact, "key", "") or ""),
+                fact_value=value,
+                fact_type=str(getattr(fact, "fact_type", "fact") or "fact"),
+                confidence=float(getattr(fact, "confidence", 0.0) or 0.0),
+                importance=float(getattr(fact, "importance", 0.0) or 0.0),
+                message_id=None,
+                extractor="livekit_persona_self_extractor:voice_agent",
+                about_target=about_target,
+                directness=directness,
+                evidence_quote=evidence_quote,
+            )
+            facts_saved += 1
+
+    seen_hashes.append(text_hash)
+    dedupe_cache["persona_reply_hashes"] = seen_hashes[-64:]
+    if facts_saved:
+        logger.info(
+            "[livekit.mem.persona] saved room=%s persona=%s facts=%s accepted=%s",
+            room_name,
+            persona_subject_id,
+            facts_saved,
+            accepted,
+        )
+    elif dry_run and accepted:
+        logger.info(
+            "[livekit.mem.persona.dry_run] room=%s persona=%s accepted=%s candidates=%s",
+            room_name,
+            persona_subject_id,
+            accepted,
+            len(facts),
+        )
+
+
 async def _build_voice_memory_overlay_block(
     *,
     memory_store: Any | None,
@@ -697,7 +904,25 @@ async def _build_voice_memory_overlay_block(
         return block
 
     try:
-        lines = ["PERSISTED USER MEMORY (voice retrieval, lower priority than RP CANON):"]
+        lines = ["PERSISTED MEMORY (voice retrieval, lower priority than RP CANON):"]
+        persona_subject_id = str(getattr(base_settings, "persona_id", "") or "persona").strip() or "persona"
+        persona_subject_user_id = _persona_memory_subject_user_id(base_settings)
+        persona_bio_row = await _get_voice_persona_biography_summary(memory_store, persona_id=persona_subject_id)
+        persona_bio_text = str((persona_bio_row or {}).get("summary_text") or "").strip()
+        persona_facts_rows = await _get_voice_persona_self_facts(
+            memory_store,
+            persona_subject_user_id=persona_subject_user_id,
+            limit=8,
+        )
+        persona_facts = _select_voice_memory_facts(base_settings, persona_facts_rows)[:4]
+        if persona_bio_text or persona_facts:
+            lines.append("PERSISTED PERSONA MEMORY:")
+            if persona_bio_text:
+                lines.append(build_persona_biography_summary_line(_trim_runtime_text(persona_bio_text, 220)))
+            if persona_facts:
+                lines.append(build_persona_relevant_facts_section(persona_facts))
+
+        lines.append("PERSISTED USER MEMORY:")
         get_recent_dialogue_messages = getattr(memory_store, "get_recent_dialogue_messages", None)
         user_sections_added = 0
         for idx, focus in enumerate(focuses[:3]):
@@ -710,7 +935,11 @@ async def _build_voice_memory_overlay_block(
                 guild_id=guild_id,
                 user_id=user_id,
                 channel_id=channel_id,
+                allow_cross_server_summary_fallback=bool(
+                    getattr(base_settings, "memory_cross_server_dialogue_summary_fallback_enabled", False)
+                ),
             )
+            user_bio_row = await _get_voice_user_biography_summary(memory_store, user_id=user_id)
             raw_facts = await _get_voice_facts_with_global_fallback(
                 memory_store,
                 guild_id=guild_id,
@@ -747,12 +976,15 @@ async def _build_voice_memory_overlay_block(
                 )
 
             summary_text = str((summary_row or {}).get("summary_text") or "").strip()
-            if not (summary_text or facts or recent_user_lines):
+            user_bio_text = str((user_bio_row or {}).get("summary_text") or "").strip()
+            if not (user_bio_text or summary_text or facts or recent_user_lines):
                 continue
             user_sections_added += 1
             lines.append(
                 f"- user[{user_sections_added}]: {(_trim_runtime_text(label, 32) or '?')} ({_trim_runtime_text(user_id, 24)})"
             )
+            if user_bio_text:
+                lines.append(build_user_biography_summary_line(_trim_runtime_text(user_bio_text, 220)))
             if summary_text:
                 lines.append(build_user_dialogue_summary_line(_trim_runtime_text(summary_text, 180)))
             if facts:
@@ -764,7 +996,7 @@ async def _build_voice_memory_overlay_block(
                     lines.append(f"- {_trim_runtime_text(line, 120)}")
 
         block = "\n".join(line for line in lines if line).strip()
-        if user_sections_added <= 0:
+        if user_sections_added <= 0 and not (persona_bio_text or persona_facts):
             block = ""
         if len(block) > max_chars:
             block = block[: max_chars - 3].rstrip() + "..."
@@ -880,6 +1112,12 @@ def _import_livekit_plugins(use_silero_vad: bool) -> tuple[Any, Any | None]:
     try:
         from livekit.plugins import google  # type: ignore
     except Exception as exc:  # pragma: no cover - runtime dependency check
+        text = str(exc)
+        if "Plugins must be registered on the main thread" in text:
+            raise RuntimeError(
+                "LiveKit Google plugin import happened outside the job process main thread. "
+                "Use AgentServer.setup_fnc prewarm (patched in this project) or run the agent in start mode."
+            ) from exc
         raise RuntimeError(
             "LiveKit Google plugin is unavailable. Install with: pip install -r requirements-livekit.txt"
         ) from exc
@@ -981,6 +1219,25 @@ class _LizaVoiceAgent:  # runtime base class will be created dynamically per pro
     pass
 
 
+def _prewarm_job_process(_job_proc: Any) -> None:
+    """Runs in the LiveKit job process main thread before job tasks start.
+
+    We preload runtime deps here so plugin registration happens on the main thread
+    (required by livekit.plugins.google on Windows / threaded job executors).
+    """
+    try:
+        deps = _load_runtime_deps()
+        logger.debug(
+            "[livekit.prewarm] deps loaded worker=%s agent=%s model=%s",
+            deps.lk_settings.worker_name,
+            deps.lk_settings.agent_name,
+            deps.lk_settings.google_realtime_model,
+        )
+    except Exception:
+        logger.exception("[livekit.prewarm] failed to preload runtime deps in job process")
+        raise
+
+
 async def _handle_session(ctx: Any) -> None:
     configure_logging()
     deps = _load_runtime_deps()
@@ -1012,6 +1269,8 @@ async def _handle_session(ctx: Any) -> None:
     local_participant_identity = ""
     memory_store: Any | None = None
     memory_cache: dict[str, Any] = {"key": "", "fetched_at": 0.0, "block": ""}
+    persona_self_cache: dict[str, Any] = {}
+    persona_self_tasks: set[asyncio.Task[Any]] = set()
 
     try:
         try:
@@ -1048,6 +1307,7 @@ async def _handle_session(ctx: Any) -> None:
                 session_kwargs["vad"] = deps.silero.VAD.load()
 
         session = AgentSession(**session_kwargs)
+        room_guild_id = _parse_bridge_room_guild_id(room_name, lk_settings.room_prefix)
         room_input_kwargs: dict[str, Any] = {}
         if lk_settings.auto_subscribe_audio_only:
             with contextlib.suppress(Exception):
@@ -1067,6 +1327,42 @@ async def _handle_session(ctx: Any) -> None:
             session.on("close", _on_session_close)
         with contextlib.suppress(Exception):
             ctx.add_shutdown_callback(_on_job_shutdown)
+
+        def _on_conversation_item_added(event: Any) -> None:
+            try:
+                item = getattr(event, "item", None)
+                role = str(getattr(item, "role", "") or "").strip().lower()
+                if role != "assistant":
+                    return
+                text_content = getattr(item, "text_content", None)
+                text = collapse_spaces(str(text_content or ""))
+                if not text:
+                    return
+                task = asyncio.create_task(
+                    _maybe_persist_persona_self_facts_from_agent_reply(
+                        memory_store=memory_store,
+                        extractor=backfill_extractor,
+                        base_settings=base_settings,
+                        room_name=room_name,
+                        guild_id=room_guild_id or "livekit",
+                        reply_text=text,
+                        dedupe_cache=persona_self_cache,
+                    ),
+                    name=f"lk-persona-self-facts-{room_name}",
+                )
+                persona_self_tasks.add(task)
+
+                def _drop_task(done: asyncio.Task[Any]) -> None:
+                    persona_self_tasks.discard(done)
+                    with contextlib.suppress(Exception):
+                        done.result()
+
+                task.add_done_callback(_drop_task)
+            except Exception as exc:
+                logger.debug("[livekit.mem.persona] conversation item hook failed room=%s: %s", room_name, exc)
+
+        with contextlib.suppress(Exception):
+            session.on("conversation_item_added", _on_conversation_item_added)
 
         def _on_room_data(packet: Any) -> None:
             if not lk_settings.agent_runtime_context_injection_enabled:
@@ -1317,6 +1613,13 @@ async def _handle_session(ctx: Any) -> None:
                     runtime_ctx_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await runtime_ctx_task
+                if persona_self_tasks:
+                    for task in list(persona_self_tasks):
+                        task.cancel()
+                    for task in list(persona_self_tasks):
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await task
+                    persona_self_tasks.clear()
         finally:
             with contextlib.suppress(Exception):
                 if session is not None:
@@ -1372,7 +1675,7 @@ def main() -> None:
     agents, agent_types, _ = _import_livekit_modules()
     _, AgentServer, _, _ = agent_types
 
-    server = AgentServer()
+    server = AgentServer(setup_fnc=_prewarm_job_process)
 
     server.rtc_session(agent_name=lk_settings.agent_name)(_handle_session)  # type: ignore[misc]
 

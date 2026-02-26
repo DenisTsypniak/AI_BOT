@@ -6,6 +6,10 @@
 <div class="page-header">
     <h1 class="page-title">Витягнута Пам'ять</h1>
     <p class="page-description">Довгострокові факти та специфічні розмовні епізоди, витягнуті LLM.</p>
+    <div style="margin-top: 12px; display:flex; gap:10px; flex-wrap:wrap;">
+        <a href="/memory/provenance" class="btn primary">Memory Provenance</a>
+        <a href="/memory/extractor" class="btn">Extractor Diagnostics</a>
+    </div>
 </div>
 
 <h2 style="margin-top: 0;">Епізодична Пам'ять</h2>
@@ -30,7 +34,7 @@
                     <strong>{{ ep.title }}</strong>
                     <div
                         style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; text-transform: uppercase;">
-                        ТИП: {{ ep.episode_type }}</div>
+                        ТП: {{ ep.episode_type }}</div>
                 </td>
                 <td class="text-wrap" style="color: var(--text-muted); font-size: 0.9rem;">{{ ep.summary }}</td>
                 <td>
@@ -121,3 +125,4 @@
     </table>
 </div>
 {% endblock %}
+

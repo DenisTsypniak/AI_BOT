@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+
+{% block title %}Memory Provenance - Live Role Bot{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1 class="page-title">Memory Provenance</h1>
+    <p class="page-description">Local vs global facts, evidence by guild, persona self-memory, and biography summaries.</p>
+    <div style="margin-top: 12px; display: flex; gap: 10px;">
+        <a href="/memory" class="btn">Back To Memory</a>
+        <a href="/memory/extractor" class="btn">Extractor Diagnostics</a>
+        <a href="/memory/provenance?limit={{ limit }}&offset={{ offset + limit }}" class="btn">Next Page</a>
+        {% if offset > 0 %}
+        <a href="/memory/provenance?limit={{ limit }}&offset={{ prev_offset }}" class="btn">Prev Page</a>
+        {% endif %}
+    </div>
+</div>
+
+<h2 style="margin-top: 0;">Global User Facts (With Provenance)</h2>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>User</th>
+                <th>Fact</th>
+                <th>Value</th>
+                <th>Meta</th>
+                <th>Status</th>
+                <th>Conf</th>
+                <th>Guild Sources</th>
+                <th>Updated</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for fact in global_facts %}
+            <tr>
+                <td>
+                    <strong>{{ fact.display_name or fact.user_id }}</strong>
+                    <div style="font-size: 0.75rem; color: var(--text-muted); font-family: monospace;">{{ fact.user_id }}</div>
+                </td>
+                <td><span class="badge">{{ fact.fact_key }}</span></td>
+                <td class="text-wrap">{{ fact.fact_value }}</td>
+                <td>
+                    <div class="badge blue" style="margin: 2px 4px 2px 0;">{{ fact.about_target or 'self' }}</div>
+                    <div class="badge" style="margin: 2px 4px 2px 0;">{{ fact.directness or 'explicit' }}</div>
+                    {% if fact.evidence_quote %}
+                    <div class="text-wrap" style="margin-top: 4px; font-size: 0.78rem; color: var(--text-muted); max-width: 260px;">
+                        "{{ fact.evidence_quote }}"
+                    </div>
+                    {% endif %}
+                </td>
+                <td>
+                    <span class="badge {% if fact.status == 'confirmed' %}green{% elif fact.status == 'candidate' %}yellow{% endif %}">
+                        {{ fact.status }}
+                    </span>
+                </td>
+                <td>{{ "%.2f"|format(fact.confidence or 0) }}</td>
+                <td>
+                    <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px;">
+                        evidence={{ fact.provenance_evidence_count or fact.evidence_count or 0 }}
+                    </div>
+                    {% for item in fact.provenance_guild_breakdown or [] %}
+                    <div class="badge" style="margin: 2px 4px 2px 0;">
+                        {{ item.guild_id or '(none)' }}: {{ item.count }}
+                    </div>
+                    {% else %}
+                    <span class="text-muted" style="font-size: 0.8rem;">no evidence rows</span>
+                    {% endfor %}
+                    {% if fact.provenance_directness_breakdown %}
+                    <div style="margin-top: 6px;">
+                        {% for item in fact.provenance_directness_breakdown or [] %}
+                        <span class="badge blue" style="margin: 2px 4px 2px 0;">
+                            {{ item.directness or 'explicit' }}: {{ item.count }}
+                        </span>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                </td>
+                <td style="font-size: 0.85rem; color: var(--text-muted);">{{ fact.updated_at|kyiv_time }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="8" style="text-align:center; padding:24px; color:var(--text-muted);">No global facts found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2 style="margin-top: 32px;">Persona Self-Facts (Bot Continuity)</h2>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Persona Memory User ID</th>
+                <th>Fact</th>
+                <th>Value</th>
+                <th>Meta</th>
+                <th>Conf</th>
+                <th>Guild Sources</th>
+                <th>Updated</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for fact in persona_facts %}
+            <tr>
+                <td style="font-family: monospace;">{{ fact.user_id }}</td>
+                <td><span class="badge blue">{{ fact.fact_key }}</span></td>
+                <td class="text-wrap">{{ fact.fact_value }}</td>
+                <td>
+                    <div class="badge blue" style="margin: 2px 4px 2px 0;">{{ fact.about_target or 'assistant_self' }}</div>
+                    <div class="badge" style="margin: 2px 4px 2px 0;">{{ fact.directness or 'explicit' }}</div>
+                    {% if fact.evidence_quote %}
+                    <div class="text-wrap" style="margin-top: 4px; font-size: 0.78rem; color: var(--text-muted); max-width: 260px;">
+                        "{{ fact.evidence_quote }}"
+                    </div>
+                    {% endif %}
+                </td>
+                <td>{{ "%.2f"|format(fact.confidence or 0) }}</td>
+                <td>
+                    {% for item in fact.provenance_guild_breakdown or [] %}
+                    <div class="badge" style="margin: 2px 4px 2px 0;">
+                        {{ item.guild_id or '(none)' }}: {{ item.count }}
+                    </div>
+                    {% else %}
+                    <span class="text-muted" style="font-size: 0.8rem;">no evidence rows</span>
+                    {% endfor %}
+                </td>
+                <td style="font-size: 0.85rem; color: var(--text-muted);">{{ fact.updated_at|kyiv_time }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" style="text-align:center; padding:24px; color:var(--text-muted);">No persona self-facts yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2 style="margin-top: 32px;">Local Facts (Per Guild)</h2>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Guild</th>
+                <th>User</th>
+                <th>Fact</th>
+                <th>Value</th>
+                <th>Meta</th>
+                <th>Status</th>
+                <th>Updated</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for fact in local_facts %}
+            <tr>
+                <td style="font-family: monospace;">{{ fact.guild_id }}</td>
+                <td>
+                    <strong>{{ fact.display_name or fact.user_id }}</strong>
+                    <div style="font-size: 0.75rem; color: var(--text-muted); font-family: monospace;">{{ fact.user_id }}</div>
+                </td>
+                <td><span class="badge">{{ fact.fact_key }}</span></td>
+                <td class="text-wrap">{{ fact.fact_value }}</td>
+                <td>
+                    <div class="badge blue" style="margin: 2px 4px 2px 0;">{{ fact.about_target or 'self' }}</div>
+                    <div class="badge" style="margin: 2px 4px 2px 0;">{{ fact.directness or 'explicit' }}</div>
+                    {% if fact.evidence_quote %}
+                    <div class="text-wrap" style="margin-top: 4px; font-size: 0.78rem; color: var(--text-muted); max-width: 260px;">
+                        "{{ fact.evidence_quote }}"
+                    </div>
+                    {% endif %}
+                </td>
+                <td>
+                    <span class="badge {% if fact.status == 'confirmed' %}green{% elif fact.status == 'candidate' %}yellow{% endif %}">
+                        {{ fact.status }}
+                    </span>
+                </td>
+                <td style="font-size: 0.85rem; color: var(--text-muted);">{{ fact.updated_at|kyiv_time }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" style="text-align:center; padding:24px; color:var(--text-muted);">No local facts found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2 style="margin-top: 32px;">Global Biography Summaries</h2>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Subject</th>
+                <th>Summary</th>
+                <th>Fact Count</th>
+                <th>Last Guild</th>
+                <th>Updated</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in biographies %}
+            <tr>
+                <td>
+                    <span class="badge {% if row.subject_kind == 'persona' %}blue{% else %}green{% endif %}">{{ row.subject_kind }}</span>
+                    <div style="margin-top: 4px; font-family: monospace; font-size: 0.8rem;">{{ row.subject_id }}</div>
+                </td>
+                <td class="text-wrap">{{ row.summary_text }}</td>
+                <td>{{ row.source_fact_count or 0 }}</td>
+                <td style="font-family: monospace;">{{ row.last_source_guild_id or '' }}</td>
+                <td style="font-size: 0.85rem; color: var(--text-muted);">{{ row.updated_at|kyiv_time }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" style="text-align:center; padding:24px; color:var(--text-muted);">No biography summaries found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

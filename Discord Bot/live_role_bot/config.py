@@ -7,7 +7,8 @@ from typing import Set
 
 from dotenv import load_dotenv
 
-
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env")
 load_dotenv()
 
 
@@ -62,6 +63,18 @@ def _env_id_set(name: str, aliases: tuple[str, ...] = ()) -> Set[int]:
         except ValueError:
             continue
     return result
+
+
+def _env_str_tuple(name: str, aliases: tuple[str, ...] = ()) -> tuple[str, ...]:
+    raw = (_env_lookup(name, aliases) or "").strip()
+    if not raw:
+        return ()
+    items: list[str] = []
+    for chunk in raw.split(","):
+        value = chunk.strip()
+        if value:
+            items.append(value)
+    return tuple(items)
 
 
 def _clean_token(value: str) -> str:
@@ -122,7 +135,23 @@ class Settings:
     memory_enabled: bool
     memory_fact_top_k: int
     memory_candidate_fact_limit: int
+    memory_extractor_backend: str
+    memory_extractor_dialogue_window_messages: int
+    memory_ollama_base_url: str
+    memory_ollama_model: str
+    memory_ollama_timeout_seconds: int
+    memory_ollama_temperature: float
+    memory_extractor_dry_run_enabled: bool
+    memory_extractor_audit_enabled: bool
+    memory_fact_moderation_v2_enabled: bool
+    memory_fact_key_whitelist: tuple[str, ...]
+    memory_fact_key_blacklist: tuple[str, ...]
+    memory_persona_self_facts_enabled: bool
+    memory_biography_summary_enabled: bool
+    memory_biography_summary_max_chars: int
+    memory_biography_summary_refresh_min_interval_seconds: int
     summary_enabled: bool
+    memory_cross_server_dialogue_summary_fallback_enabled: bool
     summary_min_new_user_messages: int
     summary_window_messages: int
     summary_max_chars: int
@@ -218,7 +247,30 @@ class Settings:
             memory_enabled=_env_bool("MEMORY_ENABLED", True, aliases=("LONG_MEMORY_ENABLED",)),
             memory_fact_top_k=_env_int("MEMORY_FACT_TOP_K", 8, aliases=("PROFILE_FACT_LIMIT",)),
             memory_candidate_fact_limit=_env_int("MEMORY_CANDIDATE_FACT_LIMIT", 10),
+            memory_extractor_backend=_env_str("MEMORY_EXTRACTOR_BACKEND", "gemini").lower(),
+            memory_extractor_dialogue_window_messages=_env_int("MEMORY_EXTRACTOR_DIALOGUE_WINDOW_MESSAGES", 6),
+            memory_ollama_base_url=_env_str("MEMORY_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+            memory_ollama_model=_env_str("MEMORY_OLLAMA_MODEL", "qwen2.5:7b-instruct"),
+            memory_ollama_timeout_seconds=_env_int("MEMORY_OLLAMA_TIMEOUT_SECONDS", 45),
+            memory_ollama_temperature=_env_float("MEMORY_OLLAMA_TEMPERATURE", 0.1),
+            memory_extractor_dry_run_enabled=_env_bool("MEMORY_EXTRACTOR_DRY_RUN_ENABLED", False),
+            memory_extractor_audit_enabled=_env_bool("MEMORY_EXTRACTOR_AUDIT_ENABLED", True),
+            memory_fact_moderation_v2_enabled=_env_bool("MEMORY_FACT_MODERATION_V2_ENABLED", True),
+            memory_fact_key_whitelist=_env_str_tuple("MEMORY_FACT_KEY_WHITELIST"),
+            memory_fact_key_blacklist=_env_str_tuple("MEMORY_FACT_KEY_BLACKLIST"),
+            memory_persona_self_facts_enabled=_env_bool("MEMORY_PERSONA_SELF_FACTS_ENABLED", True),
+            memory_biography_summary_enabled=_env_bool("MEMORY_BIOGRAPHY_SUMMARY_ENABLED", True),
+            memory_biography_summary_max_chars=_env_int("MEMORY_BIOGRAPHY_SUMMARY_MAX_CHARS", 520),
+            memory_biography_summary_refresh_min_interval_seconds=_env_int(
+                "MEMORY_BIOGRAPHY_SUMMARY_REFRESH_MIN_INTERVAL_SECONDS",
+                90,
+            ),
             summary_enabled=_env_bool("SUMMARY_ENABLED", True),
+            memory_cross_server_dialogue_summary_fallback_enabled=_env_bool(
+                "MEMORY_CROSS_SERVER_DIALOGUE_SUMMARY_FALLBACK_ENABLED",
+                False,
+                aliases=("SUMMARY_CROSS_SERVER_FALLBACK_ENABLED",),
+            ),
             summary_min_new_user_messages=_env_int("SUMMARY_MIN_NEW_USER_MESSAGES", 5),
             summary_window_messages=_env_int("SUMMARY_WINDOW_MESSAGES", 24),
             summary_max_chars=_env_int("SUMMARY_MAX_CHARS", 1100),
@@ -329,6 +381,24 @@ class Settings:
             raise ValueError("MEMORY_FACT_TOP_K must be >= 1")
         if self.memory_candidate_fact_limit < 1:
             raise ValueError("MEMORY_CANDIDATE_FACT_LIMIT must be >= 1")
+        if self.memory_extractor_backend not in {"gemini", "ollama"}:
+            raise ValueError("MEMORY_EXTRACTOR_BACKEND must be 'gemini' or 'ollama'")
+        if self.memory_extractor_dialogue_window_messages < 0 or self.memory_extractor_dialogue_window_messages > 24:
+            raise ValueError("MEMORY_EXTRACTOR_DIALOGUE_WINDOW_MESSAGES must be in [0, 24]")
+        if self.memory_ollama_timeout_seconds < 5:
+            raise ValueError("MEMORY_OLLAMA_TIMEOUT_SECONDS must be >= 5")
+        if self.memory_ollama_temperature < 0.0 or self.memory_ollama_temperature > 1.0:
+            raise ValueError("MEMORY_OLLAMA_TEMPERATURE must be in [0, 1]")
+        if self.memory_extractor_backend == "ollama" and not self.memory_ollama_model.strip():
+            raise ValueError("MEMORY_OLLAMA_MODEL cannot be empty when MEMORY_EXTRACTOR_BACKEND=ollama")
+        if len(self.memory_fact_key_whitelist) > 256:
+            raise ValueError("MEMORY_FACT_KEY_WHITELIST has too many entries")
+        if len(self.memory_fact_key_blacklist) > 256:
+            raise ValueError("MEMORY_FACT_KEY_BLACKLIST has too many entries")
+        if self.memory_biography_summary_max_chars < 160:
+            raise ValueError("MEMORY_BIOGRAPHY_SUMMARY_MAX_CHARS must be >= 160")
+        if self.memory_biography_summary_refresh_min_interval_seconds < 0:
+            raise ValueError("MEMORY_BIOGRAPHY_SUMMARY_REFRESH_MIN_INTERVAL_SECONDS must be >= 0")
 
         if self.summary_min_new_user_messages < 1:
             raise ValueError("SUMMARY_MIN_NEW_USER_MESSAGES must be >= 1")

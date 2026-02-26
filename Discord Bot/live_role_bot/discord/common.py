@@ -146,6 +146,9 @@ class PendingProfileUpdate:
     modality: str = "text"
     source: str = "unknown"
     quality: float = 1.0
+    speaker_role: str = "user"
+    fact_owner_kind: str = "user"
+    fact_owner_id: str = ""
     persona_ingest_enqueued: bool = False
 
 

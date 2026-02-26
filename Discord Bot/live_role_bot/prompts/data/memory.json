@@ -6,13 +6,20 @@
         "value": "string",
         "type": "identity|preference|style_preference|goal|context|relationship|constraint|boundary|episodic|topic",
         "confidence": 0.0,
-        "importance": 0.0
+        "importance": 0.0,
+        "about_target": "self|assistant_self|other|unknown",
+        "directness": "explicit|implicit|inferred",
+        "evidence_quote": "short source quote from the text"
       }
     ]
   },
-  "fact_extractor_system_prompt": "Extract only user facts that can improve future personalization. Prioritize durable facts (identity, preferences, goals, constraints, relationship context) and reusable interaction style preferences (for example, likes short replies or step-by-step help). You may keep lightweight episodic moments only if they are likely useful as future callbacks. Ignore temporary filler, greetings, obvious noise, and random one-off phrases. Avoid sensitive data unless the user explicitly shared it and it is directly relevant to future assistance. If no durable facts exist, return facts: [].",
-  "fact_extractor_user_prompt_template": "Preferred language: {preferred_language}\nUser utterance: {text}\nReturn JSON.",
+  "fact_extractor_system_prompt": "Extract only facts about the speaker (the user who said the utterance) that can improve future personalization. Do not convert statements about other people into speaker identity facts. Prioritize durable facts (identity, age when explicitly stated, preferences, goals, constraints, relationship context) and reusable interaction style preferences (for example, likes short replies or step-by-step help). You may keep lightweight episodic moments only if they are likely useful as future callbacks. Ignore temporary filler, greetings, obvious noise, and random one-off phrases. Avoid sensitive data unless the user explicitly shared it and it is directly relevant to future assistance. For every fact, set about_target (usually self for speaker facts), directness (explicit|implicit|inferred), and a short evidence_quote copied from the text/dialogue window. If no durable facts exist, return facts: [].",
+  "fact_extractor_user_prompt_template": "Preferred language: {preferred_language}\nSpeaker role: human user\nRecent dialogue window (oldest -> newest, speaker-labeled):\n{dialogue_window}\n\nFocus user utterance (extract facts about the speaker only): {text}\nReturn JSON.",
+  "persona_self_fact_extractor_system_prompt": "Extract facts that the assistant/persona explicitly or implicitly claims about itself in first person. Treat the assistant as a persistent character with continuity. If the assistant says it did something, visited somewhere, likes/dislikes something, or has a past event, that is a valid autobiographical memory fact. Ignore pure rhetorical filler, meta formatting, and statements about the user unless they also define the persona. Set about_target=assistant_self for persona self-claims, include directness (explicit|implicit|inferred), and include a short evidence_quote. Return facts: [] if no clear self-claims are present.",
+  "persona_self_fact_extractor_user_prompt_template": "Preferred language: {preferred_language}\nRecent dialogue window (oldest -> newest, speaker-labeled):\n{dialogue_window}\n\nAssistant/persona utterance (extract self-facts only): {text}\nReturn JSON.",
   "json_only_system_prompt_template": "Return only valid JSON object with no markdown and no additional commentary. Schema hint: {schema_hint}",
   "summary_update_system_prompt_template": "Update rolling memory summary for one user's ongoing dialogue with assistant. Keep durable topics, preferences, goals, unresolved items, emotional context. Output plain text, max {max_chars} chars.",
-  "summary_update_user_prompt_template": "Previous summary:\n{previous_summary}\n\nRecent dialogue:\n{dialogue_lines}\n\nReturn updated summary."
+  "summary_update_user_prompt_template": "Previous summary:\n{previous_summary}\n\nRecent dialogue:\n{dialogue_lines}\n\nReturn updated summary.",
+  "biography_summary_update_system_prompt_template": "Update a persistent biography summary for one {subject_kind}. Preserve continuity, stable identity, recurring preferences, relationships, and life-history details. Do not copy raw fact list. Write a compact natural-language profile. Keep uncertainty low: include only facts supported by memory facts provided. Output plain text, max {max_chars} chars.",
+  "biography_summary_update_user_prompt_template": "Subject kind: {subject_kind}\nPrevious biography summary:\n{previous_summary}\n\nMemory facts:\n{fact_lines}\n\nReturn updated biography summary."
 }

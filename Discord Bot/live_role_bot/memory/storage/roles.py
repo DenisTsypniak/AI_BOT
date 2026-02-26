@@ -4,6 +4,8 @@ from typing import Dict, Optional
 
 import aiosqlite
 
+from .utils import _sqlite_memory_connection
+
 
 class MemoryRolesMixin:
     async def ensure_role_profile(
@@ -14,7 +16,7 @@ class MemoryRolesMixin:
         style: str,
         constraints: str,
     ) -> None:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             await db.execute(
                 """
                 INSERT INTO role_profiles (role_id, name, goal, style, constraints, created_at, updated_at)
@@ -31,7 +33,7 @@ class MemoryRolesMixin:
             await db.commit()
 
     async def ensure_guild_settings(self, guild_id: str, default_role_id: str) -> None:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             await db.execute(
                 """
                 INSERT INTO guild_settings (guild_id, default_role_id, updated_at)
@@ -45,7 +47,7 @@ class MemoryRolesMixin:
             await db.commit()
 
     async def get_guild_role_id(self, guild_id: str) -> str | None:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             async with db.execute(
                 "SELECT default_role_id FROM guild_settings WHERE guild_id = ?",
                 (guild_id,),
@@ -56,7 +58,7 @@ class MemoryRolesMixin:
         return str(row[0])
 
     async def get_role_profile(self, role_id: str) -> Optional[Dict[str, str]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """

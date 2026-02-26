@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import aiosqlite
-
 from .storage.facts import MemoryFactsMixin
 from .storage.identity import MemoryIdentityMixin
 from .storage.messages import MemoryMessagesMixin
@@ -9,6 +7,7 @@ from .storage.roles import MemoryRolesMixin
 from .storage.schema import MemorySchemaMixin
 from .storage.stt import MemorySttMixin
 from .storage.summaries import MemorySummariesMixin
+from .storage.utils import _sqlite_memory_connection
 
 
 class MemoryStore(
@@ -25,5 +24,5 @@ class MemoryStore(
     backend_name = "sqlite"
 
     async def ping(self) -> None:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             await db.execute("SELECT 1")

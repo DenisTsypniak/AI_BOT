@@ -4,6 +4,8 @@ from typing import Dict, Optional
 
 import aiosqlite
 
+from .utils import _sqlite_memory_connection
+
 
 class MemoryIdentityMixin:
     async def upsert_user_identity(
@@ -16,7 +18,7 @@ class MemoryIdentityMixin:
         combined_label: str,
     ) -> None:
         primary_display_name = (discord_global_name or discord_username or "unknown").strip() or "unknown"
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             await db.execute(
                 """
                 INSERT INTO users (
@@ -61,7 +63,7 @@ class MemoryIdentityMixin:
             await db.commit()
 
     async def get_user_identity(self, guild_id: str, user_id: str) -> Optional[Dict[str, str | None]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """
@@ -89,7 +91,7 @@ class MemoryIdentityMixin:
         *,
         exclude_guild_id: str | None = None,
     ) -> Optional[Dict[str, str | None]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """

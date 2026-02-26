@@ -47,7 +47,7 @@
 
 <div class="card">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-        <h2 style="margin-top: 0; margin-bottom: 0;">Дані (Рядки {{ offset + 1 }} - {{ offset + rows|length }})</h2>
+        <h2 style="margin-top: 0; margin-bottom: 0;">Дані (Рядки {{ (offset + 1) if rows else 0 }} - {{ offset + rows|length }})</h2>
         <a href="/schema/{{ table_name }}/csv" class="btn primary" style="padding: 4px 12px; font-size: 0.9rem;">⬇️
             Export CSV</a>
     </div>
@@ -106,7 +106,6 @@
         </table>
     </div>
 
-</div>
 </div>
 
 <div class="pagination">

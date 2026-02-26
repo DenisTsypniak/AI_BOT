@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -11,7 +12,18 @@ try:
 except Exception:  # pragma: no cover - optional dependency at runtime
     asyncpg = None  # type: ignore[assignment]
 
-from .storage.utils import _clamp
+from .storage.utils import (
+    _clamp,
+    apply_memory_fact_promotion_policy,
+    merge_memory_fact_metadata_state,
+    merge_memory_fact_state,
+    normalize_memory_fact_about_target,
+    normalize_memory_fact_directness,
+    sanitize_memory_fact_evidence_quote,
+)
+
+
+logger = logging.getLogger("live_role_bot")
 
 
 def _tokenize_text(text: str) -> set[str]:
@@ -35,7 +47,7 @@ def _tokenize_text(text: str) -> set[str]:
 class PostgresMemoryStore:
     """Postgres-backed memory store implementing the same API as MemoryStore."""
 
-    SCHEMA_VERSION = 10
+    SCHEMA_VERSION = 12
     backend_name = "postgres"
 
     def __init__(self, dsn: str) -> None:
@@ -106,6 +118,122 @@ class PostgresMemoryStore:
         await self._create_persona_phase23_schema(conn)
         # v10: Trait evidence + reflection apply-path support (additive).
         await self._create_persona_phase6_schema(conn)
+        # v11: Memory fact metadata for implicit fact pipeline (additive).
+        await self._create_memory_fact_pipeline_v11_schema(conn)
+        # v12: Extractor diagnostics + dry-run candidate audit tables.
+        await self._create_memory_extractor_audit_v12_schema(conn)
+
+    async def _create_memory_fact_pipeline_v11_schema(self, conn: "asyncpg.Connection") -> None:
+        await conn.execute(
+            """
+            ALTER TABLE user_facts
+            ADD COLUMN IF NOT EXISTS about_target TEXT NOT NULL DEFAULT 'self';
+
+            ALTER TABLE user_facts
+            ADD COLUMN IF NOT EXISTS directness TEXT NOT NULL DEFAULT 'explicit';
+
+            ALTER TABLE user_facts
+            ADD COLUMN IF NOT EXISTS evidence_quote TEXT NOT NULL DEFAULT '';
+
+            ALTER TABLE global_user_facts
+            ADD COLUMN IF NOT EXISTS about_target TEXT NOT NULL DEFAULT 'self';
+
+            ALTER TABLE global_user_facts
+            ADD COLUMN IF NOT EXISTS directness TEXT NOT NULL DEFAULT 'explicit';
+
+            ALTER TABLE global_user_facts
+            ADD COLUMN IF NOT EXISTS evidence_quote TEXT NOT NULL DEFAULT '';
+
+            ALTER TABLE fact_evidence
+            ADD COLUMN IF NOT EXISTS about_target TEXT NOT NULL DEFAULT 'self';
+
+            ALTER TABLE fact_evidence
+            ADD COLUMN IF NOT EXISTS directness TEXT NOT NULL DEFAULT 'explicit';
+
+            ALTER TABLE fact_evidence
+            ADD COLUMN IF NOT EXISTS evidence_quote TEXT NOT NULL DEFAULT '';
+
+            ALTER TABLE global_fact_evidence
+            ADD COLUMN IF NOT EXISTS about_target TEXT NOT NULL DEFAULT 'self';
+
+            ALTER TABLE global_fact_evidence
+            ADD COLUMN IF NOT EXISTS directness TEXT NOT NULL DEFAULT 'explicit';
+
+            ALTER TABLE global_fact_evidence
+            ADD COLUMN IF NOT EXISTS evidence_quote TEXT NOT NULL DEFAULT '';
+
+            CREATE INDEX IF NOT EXISTS idx_facts_status_directness_lookup
+            ON user_facts(guild_id, user_id, status, directness, updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_global_facts_status_directness_lookup
+            ON global_user_facts(user_id, status, directness, updated_at DESC);
+            """
+        )
+
+    async def _create_memory_extractor_audit_v12_schema(self, conn: "asyncpg.Connection") -> None:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_extractor_runs (
+                run_id BIGSERIAL PRIMARY KEY,
+                guild_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                speaker_user_id TEXT NOT NULL,
+                fact_owner_kind TEXT NOT NULL,
+                fact_owner_id TEXT NOT NULL,
+                speaker_role TEXT NOT NULL,
+                modality TEXT NOT NULL,
+                source TEXT NOT NULL,
+                backend_name TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+                llm_attempted BOOLEAN NOT NULL DEFAULT FALSE,
+                llm_ok BOOLEAN NOT NULL DEFAULT FALSE,
+                json_valid BOOLEAN NOT NULL DEFAULT FALSE,
+                fallback_used BOOLEAN NOT NULL DEFAULT FALSE,
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                candidate_count INTEGER NOT NULL DEFAULT 0,
+                accepted_count INTEGER NOT NULL DEFAULT 0,
+                saved_count INTEGER NOT NULL DEFAULT 0,
+                filtered_count INTEGER NOT NULL DEFAULT 0,
+                error_text TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_extractor_candidates (
+                candidate_row_id BIGSERIAL PRIMARY KEY,
+                run_id BIGINT NOT NULL,
+                fact_key TEXT NOT NULL,
+                fact_value TEXT NOT NULL,
+                fact_type TEXT NOT NULL,
+                about_target TEXT NOT NULL DEFAULT 'self',
+                directness TEXT NOT NULL DEFAULT 'explicit',
+                evidence_quote TEXT NOT NULL DEFAULT '',
+                confidence DOUBLE PRECISION NOT NULL,
+                importance DOUBLE PRECISION NOT NULL,
+                moderation_action TEXT NOT NULL DEFAULT 'unknown',
+                moderation_reason TEXT NOT NULL DEFAULT '',
+                selected_for_apply BOOLEAN NOT NULL DEFAULT FALSE,
+                saved_to_memory BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                FOREIGN KEY (run_id) REFERENCES memory_extractor_runs(run_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_memory_extractor_runs_created
+            ON memory_extractor_runs(created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_memory_extractor_runs_backend_created
+            ON memory_extractor_runs(backend_name, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_memory_extractor_runs_dryrun_created
+            ON memory_extractor_runs(dry_run, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_memory_extractor_candidates_run
+            ON memory_extractor_candidates(run_id, candidate_row_id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_memory_extractor_candidates_action_created
+            ON memory_extractor_candidates(moderation_action, created_at DESC);
+            """
+        )
 
     async def _create_persona_mvp_schema(self, conn: "asyncpg.Connection") -> None:
         await conn.execute(
@@ -323,17 +451,62 @@ class PostgresMemoryStore:
                 FROM user_facts uf
             )
             INSERT INTO global_user_facts (
-                user_id, fact_key, fact_value, fact_type, confidence, importance, status, pinned, evidence_count,
+                user_id, fact_key, fact_value, fact_type, about_target, directness, evidence_quote,
+                confidence, importance, status, pinned, evidence_count,
                 first_seen_at, updated_at, last_seen_at, last_source_guild_id, last_source_message_id
             )
             SELECT
-                r.user_id, r.fact_key, r.fact_value, r.fact_type, r.confidence, r.importance, r.status, r.pinned, r.evidence_count,
+                r.user_id, r.fact_key, r.fact_value, r.fact_type,
+                COALESCE(r.about_target, 'self'),
+                COALESCE(r.directness, 'explicit'),
+                COALESCE(r.evidence_quote, ''),
+                r.confidence, r.importance, r.status, r.pinned, r.evidence_count,
                 r.created_at, r.updated_at, r.last_seen_at, r.guild_id, NULL
             FROM ranked r
             WHERE r.rn = 1
             ON CONFLICT(user_id, fact_key) DO UPDATE SET
-                fact_value = EXCLUDED.fact_value,
-                fact_type = EXCLUDED.fact_type,
+                fact_value = CASE
+                    WHEN global_user_facts.pinned THEN global_user_facts.fact_value
+                    WHEN LOWER(BTRIM(global_user_facts.fact_value)) = LOWER(BTRIM(EXCLUDED.fact_value)) THEN EXCLUDED.fact_value
+                    WHEN EXCLUDED.confidence >= global_user_facts.confidence + 0.18 THEN EXCLUDED.fact_value
+                    WHEN (
+                        NOT (
+                            global_user_facts.status IN ('confirmed', 'pinned')
+                            OR global_user_facts.confidence >= 0.78
+                        )
+                        AND EXCLUDED.confidence >= GREATEST(0.55, global_user_facts.confidence + 0.05)
+                    ) THEN EXCLUDED.fact_value
+                    WHEN global_user_facts.confidence < 0.45 AND EXCLUDED.confidence >= 0.55 THEN EXCLUDED.fact_value
+                    ELSE global_user_facts.fact_value
+                END,
+                fact_type = CASE
+                    WHEN global_user_facts.pinned THEN global_user_facts.fact_type
+                    WHEN LOWER(BTRIM(global_user_facts.fact_value)) = LOWER(BTRIM(EXCLUDED.fact_value)) THEN EXCLUDED.fact_type
+                    WHEN EXCLUDED.confidence >= global_user_facts.confidence + 0.18 THEN EXCLUDED.fact_type
+                    WHEN (
+                        NOT (
+                            global_user_facts.status IN ('confirmed', 'pinned')
+                            OR global_user_facts.confidence >= 0.78
+                        )
+                        AND EXCLUDED.confidence >= GREATEST(0.55, global_user_facts.confidence + 0.05)
+                    ) THEN EXCLUDED.fact_type
+                    WHEN global_user_facts.confidence < 0.45 AND EXCLUDED.confidence >= 0.55 THEN EXCLUDED.fact_type
+                    ELSE global_user_facts.fact_type
+                END,
+                about_target = CASE
+                    WHEN global_user_facts.about_target = 'unknown' THEN COALESCE(EXCLUDED.about_target, 'self')
+                    ELSE global_user_facts.about_target
+                END,
+                directness = CASE
+                    WHEN global_user_facts.directness = 'explicit' THEN global_user_facts.directness
+                    WHEN EXCLUDED.directness = 'explicit' THEN EXCLUDED.directness
+                    WHEN global_user_facts.directness = 'implicit' THEN global_user_facts.directness
+                    ELSE COALESCE(EXCLUDED.directness, global_user_facts.directness)
+                END,
+                evidence_quote = CASE
+                    WHEN NULLIF(BTRIM(EXCLUDED.evidence_quote), '') IS NOT NULL THEN EXCLUDED.evidence_quote
+                    ELSE global_user_facts.evidence_quote
+                END,
                 confidence = GREATEST(global_user_facts.confidence * 0.9, EXCLUDED.confidence),
                 importance = GREATEST(global_user_facts.importance, EXCLUDED.importance),
                 status = CASE
@@ -544,6 +717,9 @@ class PostgresMemoryStore:
             "messages",
             "sessions",
             "dialogue_summaries",
+            "global_biography_summaries",
+            "memory_extractor_candidates",
+            "memory_extractor_runs",
             "user_facts",
             "guild_settings",
             "role_profiles",
@@ -666,6 +842,9 @@ class PostgresMemoryStore:
                 fact_key TEXT NOT NULL,
                 fact_value TEXT NOT NULL,
                 fact_type TEXT NOT NULL,
+                about_target TEXT NOT NULL DEFAULT 'self',
+                directness TEXT NOT NULL DEFAULT 'explicit',
+                evidence_quote TEXT NOT NULL DEFAULT '',
                 confidence DOUBLE PRECISION NOT NULL,
                 importance DOUBLE PRECISION NOT NULL,
                 status TEXT NOT NULL,
@@ -683,6 +862,9 @@ class PostgresMemoryStore:
                 fact_key TEXT NOT NULL,
                 fact_value TEXT NOT NULL,
                 fact_type TEXT NOT NULL,
+                about_target TEXT NOT NULL DEFAULT 'self',
+                directness TEXT NOT NULL DEFAULT 'explicit',
+                evidence_quote TEXT NOT NULL DEFAULT '',
                 confidence DOUBLE PRECISION NOT NULL,
                 importance DOUBLE PRECISION NOT NULL,
                 status TEXT NOT NULL,
@@ -701,6 +883,9 @@ class PostgresMemoryStore:
                 fact_id BIGINT NOT NULL,
                 message_id BIGINT,
                 extractor TEXT NOT NULL,
+                about_target TEXT NOT NULL DEFAULT 'self',
+                directness TEXT NOT NULL DEFAULT 'explicit',
+                evidence_quote TEXT NOT NULL DEFAULT '',
                 confidence DOUBLE PRECISION NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 FOREIGN KEY(fact_id) REFERENCES user_facts(fact_id) ON DELETE CASCADE,
@@ -713,6 +898,9 @@ class PostgresMemoryStore:
                 source_guild_id TEXT,
                 source_message_id BIGINT,
                 extractor TEXT NOT NULL,
+                about_target TEXT NOT NULL DEFAULT 'self',
+                directness TEXT NOT NULL DEFAULT 'explicit',
+                evidence_quote TEXT NOT NULL DEFAULT '',
                 confidence DOUBLE PRECISION NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 FOREIGN KEY(global_fact_id) REFERENCES global_user_facts(global_fact_id) ON DELETE CASCADE,
@@ -729,6 +917,64 @@ class PostgresMemoryStore:
                 last_message_id BIGINT,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE(guild_id, user_id, channel_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS global_biography_summaries (
+                subject_kind TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                summary_text TEXT NOT NULL,
+                source_fact_count INTEGER NOT NULL DEFAULT 0,
+                source_summary_count INTEGER NOT NULL DEFAULT 0,
+                source_updated_at TIMESTAMPTZ,
+                last_source_guild_id TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY(subject_kind, subject_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_extractor_runs (
+                run_id BIGSERIAL PRIMARY KEY,
+                guild_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                speaker_user_id TEXT NOT NULL,
+                fact_owner_kind TEXT NOT NULL,
+                fact_owner_id TEXT NOT NULL,
+                speaker_role TEXT NOT NULL,
+                modality TEXT NOT NULL,
+                source TEXT NOT NULL,
+                backend_name TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+                llm_attempted BOOLEAN NOT NULL DEFAULT FALSE,
+                llm_ok BOOLEAN NOT NULL DEFAULT FALSE,
+                json_valid BOOLEAN NOT NULL DEFAULT FALSE,
+                fallback_used BOOLEAN NOT NULL DEFAULT FALSE,
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                candidate_count INTEGER NOT NULL DEFAULT 0,
+                accepted_count INTEGER NOT NULL DEFAULT 0,
+                saved_count INTEGER NOT NULL DEFAULT 0,
+                filtered_count INTEGER NOT NULL DEFAULT 0,
+                error_text TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_extractor_candidates (
+                candidate_row_id BIGSERIAL PRIMARY KEY,
+                run_id BIGINT NOT NULL,
+                fact_key TEXT NOT NULL,
+                fact_value TEXT NOT NULL,
+                fact_type TEXT NOT NULL,
+                about_target TEXT NOT NULL DEFAULT 'self',
+                directness TEXT NOT NULL DEFAULT 'explicit',
+                evidence_quote TEXT NOT NULL DEFAULT '',
+                confidence DOUBLE PRECISION NOT NULL,
+                importance DOUBLE PRECISION NOT NULL,
+                moderation_action TEXT NOT NULL DEFAULT 'unknown',
+                moderation_reason TEXT NOT NULL DEFAULT '',
+                selected_for_apply BOOLEAN NOT NULL DEFAULT FALSE,
+                saved_to_memory BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                FOREIGN KEY(run_id) REFERENCES memory_extractor_runs(run_id) ON DELETE CASCADE
             );
 
             CREATE INDEX IF NOT EXISTS idx_sessions_lookup
@@ -752,8 +998,29 @@ class PostgresMemoryStore:
             CREATE INDEX IF NOT EXISTS idx_global_fact_evidence_lookup
             ON global_fact_evidence(global_fact_id, created_at DESC);
 
+            CREATE INDEX IF NOT EXISTS idx_global_fact_evidence_source_lookup
+            ON global_fact_evidence(global_fact_id, source_guild_id, created_at DESC);
+
             CREATE INDEX IF NOT EXISTS idx_summary_lookup
             ON dialogue_summaries(guild_id, user_id, channel_id);
+
+            CREATE INDEX IF NOT EXISTS idx_global_biography_summaries_lookup
+            ON global_biography_summaries(subject_kind, updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_memory_extractor_runs_created
+            ON memory_extractor_runs(created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_memory_extractor_runs_backend_created
+            ON memory_extractor_runs(backend_name, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_memory_extractor_runs_dryrun_created
+            ON memory_extractor_runs(dry_run, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_memory_extractor_candidates_run
+            ON memory_extractor_candidates(run_id, candidate_row_id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_memory_extractor_candidates_action_created
+            ON memory_extractor_candidates(moderation_action, created_at DESC);
 
             CREATE INDEX IF NOT EXISTS idx_stt_lookup
             ON stt_turns(guild_id, channel_id, user_id, created_at DESC);
@@ -1196,6 +1463,89 @@ class PostgresMemoryStore:
             "updated_at": str(row["updated_at"]),
         }
 
+    async def get_global_biography_summary(
+        self,
+        subject_kind: str,
+        subject_id: str,
+    ) -> Optional[Dict[str, object]]:
+        kind = str(subject_kind or "").strip().lower()
+        subject = str(subject_id or "").strip()
+        if not (kind and subject):
+            return None
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT subject_kind, subject_id, summary_text, source_fact_count, source_summary_count,
+                       source_updated_at, last_source_guild_id, created_at, updated_at
+                FROM global_biography_summaries
+                WHERE subject_kind = $1 AND subject_id = $2
+                """,
+                kind,
+                subject,
+            )
+        if row is None:
+            return None
+        return {
+            "subject_kind": str(row["subject_kind"]),
+            "subject_id": str(row["subject_id"]),
+            "summary_text": str(row["summary_text"]),
+            "source_fact_count": int(row["source_fact_count"] or 0),
+            "source_summary_count": int(row["source_summary_count"] or 0),
+            "source_updated_at": str(row["source_updated_at"] or ""),
+            "last_source_guild_id": str(row["last_source_guild_id"] or ""),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    async def get_global_user_biography_summary(self, user_id: str) -> Optional[Dict[str, object]]:
+        return await self.get_global_biography_summary("user", user_id)
+
+    async def get_persona_biography_summary(self, persona_id: str) -> Optional[Dict[str, object]]:
+        return await self.get_global_biography_summary("persona", persona_id)
+
+    async def upsert_global_biography_summary(
+        self,
+        *,
+        subject_kind: str,
+        subject_id: str,
+        summary_text: str,
+        source_fact_count: int = 0,
+        source_summary_count: int = 0,
+        source_updated_at: str | None = None,
+        last_source_guild_id: str | None = None,
+    ) -> None:
+        kind = str(subject_kind or "").strip().lower()
+        subject = str(subject_id or "").strip()
+        summary = summary_text.strip()
+        if not (kind and subject and summary):
+            return
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO global_biography_summaries (
+                    subject_kind, subject_id, summary_text, source_fact_count, source_summary_count,
+                    source_updated_at, last_source_guild_id, created_at, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7, NOW(), NOW())
+                ON CONFLICT(subject_kind, subject_id) DO UPDATE SET
+                    summary_text = EXCLUDED.summary_text,
+                    source_fact_count = EXCLUDED.source_fact_count,
+                    source_summary_count = EXCLUDED.source_summary_count,
+                    source_updated_at = EXCLUDED.source_updated_at,
+                    last_source_guild_id = EXCLUDED.last_source_guild_id,
+                    updated_at = NOW()
+                """,
+                kind,
+                subject,
+                summary,
+                max(0, int(source_fact_count)),
+                max(0, int(source_summary_count)),
+                str(source_updated_at).strip() if source_updated_at else None,
+                str(last_source_guild_id).strip() if last_source_guild_id else None,
+            )
+
     async def upsert_dialogue_summary(
         self,
         guild_id: str,
@@ -1265,6 +1615,106 @@ class PostgresMemoryStore:
                 status,
             )
 
+    async def record_memory_extractor_run(
+        self,
+        *,
+        guild_id: str,
+        channel_id: str,
+        speaker_user_id: str,
+        fact_owner_kind: str,
+        fact_owner_id: str,
+        speaker_role: str,
+        modality: str,
+        source: str,
+        backend_name: str,
+        model_name: str,
+        dry_run: bool,
+        llm_attempted: bool,
+        llm_ok: bool,
+        json_valid: bool,
+        fallback_used: bool,
+        latency_ms: int,
+        candidate_count: int,
+        accepted_count: int,
+        saved_count: int,
+        filtered_count: int,
+        error_text: str,
+        candidates: list[dict[str, object]] | None = None,
+    ) -> int:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                run_id = await conn.fetchval(
+                    """
+                    INSERT INTO memory_extractor_runs (
+                        guild_id, channel_id, speaker_user_id, fact_owner_kind, fact_owner_id, speaker_role,
+                        modality, source, backend_name, model_name, dry_run, llm_attempted, llm_ok, json_valid,
+                        fallback_used, latency_ms, candidate_count, accepted_count, saved_count, filtered_count, error_text,
+                        created_at
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6,
+                        $7, $8, $9, $10, $11, $12, $13, $14,
+                        $15, $16, $17, $18, $19, $20, $21,
+                        NOW()
+                    )
+                    RETURNING run_id
+                    """,
+                    str(guild_id or ""),
+                    str(channel_id or ""),
+                    str(speaker_user_id or ""),
+                    str(fact_owner_kind or "user"),
+                    str(fact_owner_id or ""),
+                    str(speaker_role or "user"),
+                    str(modality or "text"),
+                    str(source or "unknown"),
+                    str(backend_name or ""),
+                    str(model_name or ""),
+                    bool(dry_run),
+                    bool(llm_attempted),
+                    bool(llm_ok),
+                    bool(json_valid),
+                    bool(fallback_used),
+                    max(0, int(latency_ms)),
+                    max(0, int(candidate_count)),
+                    max(0, int(accepted_count)),
+                    max(0, int(saved_count)),
+                    max(0, int(filtered_count)),
+                    str(error_text or "")[:400],
+                )
+                run_id = int(run_id or 0)
+                for row in list(candidates or []):
+                    if not isinstance(row, dict):
+                        continue
+                    await conn.execute(
+                        """
+                        INSERT INTO memory_extractor_candidates (
+                            run_id, fact_key, fact_value, fact_type, about_target, directness, evidence_quote,
+                            confidence, importance, moderation_action, moderation_reason, selected_for_apply, saved_to_memory,
+                            created_at
+                        )
+                        VALUES (
+                            $1, $2, $3, $4, $5, $6, $7,
+                            $8, $9, $10, $11, $12, $13,
+                            NOW()
+                        )
+                        """,
+                        run_id,
+                        str(row.get("fact_key") or "")[:140],
+                        str(row.get("fact_value") or "")[:280],
+                        str(row.get("fact_type") or "fact")[:80],
+                        str(row.get("about_target") or "self")[:32],
+                        str(row.get("directness") or "explicit")[:32],
+                        str(row.get("evidence_quote") or "")[:220],
+                        _clamp(float(row.get("confidence") or 0.0), 0.0, 1.0),
+                        _clamp(float(row.get("importance") or 0.0), 0.0, 1.0),
+                        str(row.get("moderation_action") or "unknown")[:64],
+                        str(row.get("moderation_reason") or "")[:200],
+                        bool(row.get("selected_for_apply")),
+                        bool(row.get("saved_to_memory")),
+                    )
+                return run_id
+
     async def upsert_user_fact(
         self,
         guild_id: str,
@@ -1276,6 +1726,10 @@ class PostgresMemoryStore:
         importance: float,
         message_id: int | None,
         extractor: str,
+        *,
+        about_target: str = "self",
+        directness: str = "explicit",
+        evidence_quote: str = "",
     ) -> int:
         key = fact_key.strip().casefold()
         value = fact_value.strip()
@@ -1285,13 +1739,22 @@ class PostgresMemoryStore:
         fact_type_clean = fact_type.strip().lower() or "fact"
         conf = _clamp(float(confidence), 0.0, 1.0)
         imp = _clamp(float(importance), 0.0, 1.0)
+        about_target_clean = normalize_memory_fact_about_target(
+            about_target,
+            default="assistant_self" if str(user_id).startswith("persona::") else "self",
+        )
+        directness_clean = normalize_memory_fact_directness(directness, default="explicit")
+        evidence_quote_clean = sanitize_memory_fact_evidence_quote(evidence_quote)
 
         pool = await self._ensure_pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
                     """
-                    SELECT fact_id, confidence, importance, evidence_count, status, pinned
+                    SELECT fact_id, fact_value, fact_type, confidence, importance, evidence_count, status, pinned,
+                           COALESCE(about_target, 'self') AS about_target,
+                           COALESCE(directness, 'explicit') AS directness,
+                           COALESCE(evidence_quote, '') AS evidence_quote
                     FROM user_facts
                     WHERE guild_id = $1 AND user_id = $2 AND fact_key = $3
                     """,
@@ -1301,15 +1764,26 @@ class PostgresMemoryStore:
                 )
 
                 if row is None:
-                    status = "confirmed" if conf >= 0.78 else "candidate"
+                    status = apply_memory_fact_promotion_policy(
+                        current_status="confirmed" if conf >= 0.78 else "candidate",
+                        prior_status="candidate",
+                        pinned=False,
+                        confidence=conf,
+                        importance=imp,
+                        evidence_count=1,
+                        directness=directness_clean,
+                        value_conflict=False,
+                        value_replaced=False,
+                    )
                     fact_id = await conn.fetchval(
                         """
                         INSERT INTO user_facts (
                             guild_id, user_id, fact_key, fact_value, fact_type,
+                            about_target, directness, evidence_quote,
                             confidence, importance, status, pinned, evidence_count,
                             created_at, updated_at, last_seen_at
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, 1, NOW(), NOW(), NOW())
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, FALSE, 1, NOW(), NOW(), NOW())
                         RETURNING fact_id
                         """,
                         guild_id,
@@ -1317,6 +1791,9 @@ class PostgresMemoryStore:
                         key,
                         value[:280],
                         fact_type_clean,
+                        about_target_clean,
+                        directness_clean,
+                        evidence_quote_clean,
                         conf,
                         imp,
                         status,
@@ -1324,61 +1801,104 @@ class PostgresMemoryStore:
                     fact_id = int(fact_id)
                 else:
                     fact_id = int(row["fact_id"])
-                    prior_conf = float(row["confidence"])
-                    prior_imp = float(row["importance"])
-                    prior_count = int(row["evidence_count"])
-                    prior_status = str(row["status"])
-                    pinned = bool(row["pinned"])
+                    merge = merge_memory_fact_state(
+                        prior_value=str(row["fact_value"] or ""),
+                        prior_fact_type=str(row["fact_type"] or "fact"),
+                        prior_confidence=float(row["confidence"]),
+                        prior_importance=float(row["importance"]),
+                        prior_evidence_count=int(row["evidence_count"]),
+                        prior_status=str(row["status"]),
+                        pinned=bool(row["pinned"]),
+                        incoming_value=value,
+                        incoming_fact_type=fact_type_clean,
+                        incoming_confidence=conf,
+                        incoming_importance=imp,
+                    )
+                    if merge.value_conflict:
+                        logger.debug(
+                            "Memory fact conflict (postgres local): guild=%s user=%s key=%s replaced=%s prior_conf=%.3f incoming_conf=%.3f",
+                            guild_id,
+                            user_id,
+                            key,
+                            merge.value_replaced,
+                            float(row["confidence"]),
+                            conf,
+                        )
 
-                    merged_conf = _clamp(max(prior_conf * 0.86, conf), 0.0, 1.0)
-                    merged_imp = _clamp(max(prior_imp, imp), 0.0, 1.0)
-                    merged_count = prior_count + 1
-
-                    if pinned:
-                        merged_status = "pinned"
-                    elif merged_count >= 2 or merged_conf >= 0.78:
-                        merged_status = "confirmed"
-                    elif prior_status == "confirmed":
-                        merged_status = "confirmed"
-                    else:
-                        merged_status = "candidate"
+                    meta = merge_memory_fact_metadata_state(
+                        prior_value=str(row["fact_value"] or ""),
+                        incoming_value=value,
+                        prior_about_target=str(row["about_target"] or "self"),
+                        incoming_about_target=about_target_clean,
+                        prior_directness=str(row["directness"] or "explicit"),
+                        incoming_directness=directness_clean,
+                        prior_evidence_quote=str(row["evidence_quote"] or ""),
+                        incoming_evidence_quote=evidence_quote_clean,
+                        value_conflict=merge.value_conflict,
+                        value_replaced=merge.value_replaced,
+                    )
+                    next_status = apply_memory_fact_promotion_policy(
+                        current_status=merge.status,
+                        prior_status=str(row["status"] or "candidate"),
+                        pinned=bool(row["pinned"]),
+                        confidence=merge.confidence,
+                        importance=merge.importance,
+                        evidence_count=merge.evidence_count,
+                        directness=meta.directness,
+                        value_conflict=merge.value_conflict,
+                        value_replaced=merge.value_replaced,
+                    )
 
                     await conn.execute(
                         """
                         UPDATE user_facts
                         SET fact_value = $1,
                             fact_type = $2,
-                            confidence = $3,
-                            importance = $4,
-                            status = $5,
-                            evidence_count = $6,
+                            about_target = $3,
+                            directness = $4,
+                            evidence_quote = $5,
+                            confidence = $6,
+                            importance = $7,
+                            status = $8,
+                            evidence_count = $9,
                             updated_at = NOW(),
                             last_seen_at = NOW()
-                        WHERE fact_id = $7
+                        WHERE fact_id = $10
                         """,
-                        value[:280],
-                        fact_type_clean,
-                        merged_conf,
-                        merged_imp,
-                        merged_status,
-                        merged_count,
+                        merge.fact_value,
+                        merge.fact_type,
+                        meta.about_target,
+                        meta.directness,
+                        meta.evidence_quote,
+                        merge.confidence,
+                        merge.importance,
+                        next_status,
+                        merge.evidence_count,
                         fact_id,
                     )
 
                 await conn.execute(
                     """
-                    INSERT INTO fact_evidence (fact_id, message_id, extractor, confidence, created_at)
-                    VALUES ($1, $2, $3, $4, NOW())
+                    INSERT INTO fact_evidence (
+                        fact_id, message_id, extractor, about_target, directness, evidence_quote, confidence, created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
                     """,
                     fact_id,
                     message_id,
                     extractor,
+                    about_target_clean,
+                    directness_clean,
+                    evidence_quote_clean,
                     conf,
                 )
 
                 global_row = await conn.fetchrow(
                     """
-                    SELECT global_fact_id, confidence, importance, evidence_count, status, pinned
+                    SELECT global_fact_id, fact_value, fact_type, confidence, importance, evidence_count, status, pinned,
+                           COALESCE(about_target, 'self') AS about_target,
+                           COALESCE(directness, 'explicit') AS directness,
+                           COALESCE(evidence_quote, '') AS evidence_quote
                     FROM global_user_facts
                     WHERE user_id = $1 AND fact_key = $2
                     """,
@@ -1386,22 +1906,36 @@ class PostgresMemoryStore:
                     key,
                 )
                 if global_row is None:
-                    global_status = "confirmed" if conf >= 0.78 else "candidate"
+                    global_status = apply_memory_fact_promotion_policy(
+                        current_status="confirmed" if conf >= 0.78 else "candidate",
+                        prior_status="candidate",
+                        pinned=False,
+                        confidence=conf,
+                        importance=imp,
+                        evidence_count=1,
+                        directness=directness_clean,
+                        value_conflict=False,
+                        value_replaced=False,
+                    )
                     global_fact_id = await conn.fetchval(
                         """
                         INSERT INTO global_user_facts (
                             user_id, fact_key, fact_value, fact_type,
+                            about_target, directness, evidence_quote,
                             confidence, importance, status, pinned, evidence_count,
                             first_seen_at, updated_at, last_seen_at,
                             last_source_guild_id, last_source_message_id
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, 1, NOW(), NOW(), NOW(), $8, $9)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, FALSE, 1, NOW(), NOW(), NOW(), $11, $12)
                         RETURNING global_fact_id
                         """,
                         user_id,
                         key,
                         value[:280],
                         fact_type_clean,
+                        about_target_clean,
+                        directness_clean,
+                        evidence_quote_clean,
                         conf,
                         imp,
                         global_status,
@@ -1411,46 +1945,81 @@ class PostgresMemoryStore:
                     global_fact_id = int(global_fact_id)
                 else:
                     global_fact_id = int(global_row["global_fact_id"])
-                    g_prior_conf = float(global_row["confidence"])
-                    g_prior_imp = float(global_row["importance"])
-                    g_prior_count = int(global_row["evidence_count"])
-                    g_prior_status = str(global_row["status"])
-                    g_pinned = bool(global_row["pinned"])
+                    g_merge = merge_memory_fact_state(
+                        prior_value=str(global_row["fact_value"] or ""),
+                        prior_fact_type=str(global_row["fact_type"] or "fact"),
+                        prior_confidence=float(global_row["confidence"]),
+                        prior_importance=float(global_row["importance"]),
+                        prior_evidence_count=int(global_row["evidence_count"]),
+                        prior_status=str(global_row["status"]),
+                        pinned=bool(global_row["pinned"]),
+                        incoming_value=value,
+                        incoming_fact_type=fact_type_clean,
+                        incoming_confidence=conf,
+                        incoming_importance=imp,
+                    )
+                    if g_merge.value_conflict:
+                        logger.debug(
+                            "Memory fact conflict (postgres global): user=%s key=%s source_guild=%s replaced=%s prior_conf=%.3f incoming_conf=%.3f",
+                            user_id,
+                            key,
+                            guild_id,
+                            g_merge.value_replaced,
+                            float(global_row["confidence"]),
+                            conf,
+                        )
 
-                    g_merged_conf = _clamp(max(g_prior_conf * 0.86, conf), 0.0, 1.0)
-                    g_merged_imp = _clamp(max(g_prior_imp, imp), 0.0, 1.0)
-                    g_merged_count = g_prior_count + 1
-
-                    if g_pinned:
-                        g_merged_status = "pinned"
-                    elif g_merged_count >= 2 or g_merged_conf >= 0.78:
-                        g_merged_status = "confirmed"
-                    elif g_prior_status == "confirmed":
-                        g_merged_status = "confirmed"
-                    else:
-                        g_merged_status = "candidate"
+                    g_meta = merge_memory_fact_metadata_state(
+                        prior_value=str(global_row["fact_value"] or ""),
+                        incoming_value=value,
+                        prior_about_target=str(global_row["about_target"] or "self"),
+                        incoming_about_target=about_target_clean,
+                        prior_directness=str(global_row["directness"] or "explicit"),
+                        incoming_directness=directness_clean,
+                        prior_evidence_quote=str(global_row["evidence_quote"] or ""),
+                        incoming_evidence_quote=evidence_quote_clean,
+                        value_conflict=g_merge.value_conflict,
+                        value_replaced=g_merge.value_replaced,
+                    )
+                    g_status = apply_memory_fact_promotion_policy(
+                        current_status=g_merge.status,
+                        prior_status=str(global_row["status"] or "candidate"),
+                        pinned=bool(global_row["pinned"]),
+                        confidence=g_merge.confidence,
+                        importance=g_merge.importance,
+                        evidence_count=g_merge.evidence_count,
+                        directness=g_meta.directness,
+                        value_conflict=g_merge.value_conflict,
+                        value_replaced=g_merge.value_replaced,
+                    )
 
                     await conn.execute(
                         """
                         UPDATE global_user_facts
                         SET fact_value = $1,
                             fact_type = $2,
-                            confidence = $3,
-                            importance = $4,
-                            status = $5,
-                            evidence_count = $6,
+                            about_target = $3,
+                            directness = $4,
+                            evidence_quote = $5,
+                            confidence = $6,
+                            importance = $7,
+                            status = $8,
+                            evidence_count = $9,
                             updated_at = NOW(),
                             last_seen_at = NOW(),
-                            last_source_guild_id = $7,
-                            last_source_message_id = $8
-                        WHERE global_fact_id = $9
+                            last_source_guild_id = $10,
+                            last_source_message_id = $11
+                        WHERE global_fact_id = $12
                         """,
-                        value[:280],
-                        fact_type_clean,
-                        g_merged_conf,
-                        g_merged_imp,
-                        g_merged_status,
-                        g_merged_count,
+                        g_merge.fact_value,
+                        g_merge.fact_type,
+                        g_meta.about_target,
+                        g_meta.directness,
+                        g_meta.evidence_quote,
+                        g_merge.confidence,
+                        g_merge.importance,
+                        g_status,
+                        g_merge.evidence_count,
                         guild_id,
                         message_id,
                         global_fact_id,
@@ -1459,14 +2028,18 @@ class PostgresMemoryStore:
                 await conn.execute(
                     """
                     INSERT INTO global_fact_evidence (
-                        global_fact_id, source_guild_id, source_message_id, extractor, confidence, created_at
+                        global_fact_id, source_guild_id, source_message_id, extractor,
+                        about_target, directness, evidence_quote, confidence, created_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, NOW())
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
                     """,
                     global_fact_id,
                     guild_id,
                     message_id,
                     extractor,
+                    about_target_clean,
+                    directness_clean,
+                    evidence_quote_clean,
                     conf,
                 )
 
@@ -1478,6 +2051,9 @@ class PostgresMemoryStore:
             rows = await conn.fetch(
                 """
                 SELECT fact_id, fact_key, fact_value, fact_type, confidence, importance,
+                       COALESCE(about_target, 'self') AS about_target,
+                       COALESCE(directness, 'explicit') AS directness,
+                       COALESCE(evidence_quote, '') AS evidence_quote,
                        status, pinned, evidence_count, updated_at, last_seen_at
                 FROM user_facts
                 WHERE guild_id = $1 AND user_id = $2
@@ -1506,6 +2082,9 @@ class PostgresMemoryStore:
                 "fact_type": str(row["fact_type"]),
                 "confidence": float(row["confidence"]),
                 "importance": float(row["importance"]),
+                "about_target": str(row["about_target"] or "self"),
+                "directness": str(row["directness"] or "explicit"),
+                "evidence_quote": str(row["evidence_quote"] or ""),
                 "status": str(row["status"]),
                 "pinned": bool(row["pinned"]),
                 "evidence_count": int(row["evidence_count"]),
@@ -1524,28 +2103,70 @@ class PostgresMemoryStore:
     ) -> List[Dict[str, object]]:
         pool = await self._ensure_pool()
         async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT global_fact_id, user_id, fact_key, fact_value, fact_type, confidence, importance,
-                       status, pinned, evidence_count, updated_at, last_seen_at, last_source_guild_id
-                FROM global_user_facts
-                WHERE user_id = $1
-                ORDER BY
-                    pinned DESC,
-                    CASE status
-                        WHEN 'pinned' THEN 3
-                        WHEN 'confirmed' THEN 2
-                        ELSE 1
-                    END DESC,
-                    importance DESC,
-                    confidence DESC,
-                    evidence_count DESC,
-                    updated_at DESC
-                LIMIT $2
-                """,
-                user_id,
-                max(1, int(limit)),
-            )
+            if exclude_guild_id:
+                rows = await conn.fetch(
+                    """
+                    SELECT guf.global_fact_id, guf.user_id, guf.fact_key, guf.fact_value, guf.fact_type, guf.confidence, guf.importance,
+                           COALESCE(guf.about_target, 'self') AS about_target,
+                           COALESCE(guf.directness, 'explicit') AS directness,
+                           COALESCE(guf.evidence_quote, '') AS evidence_quote,
+                           guf.status, guf.pinned, guf.evidence_count, guf.updated_at, guf.last_seen_at, guf.last_source_guild_id
+                    FROM global_user_facts AS guf
+                    WHERE guf.user_id = $1
+                      AND (
+                            guf.last_source_guild_id IS NULL
+                         OR guf.last_source_guild_id <> $2
+                         OR EXISTS (
+                                SELECT 1
+                                FROM global_fact_evidence AS gfe
+                                WHERE gfe.global_fact_id = guf.global_fact_id
+                                  AND gfe.source_guild_id IS NOT NULL
+                                  AND gfe.source_guild_id <> $2
+                            )
+                      )
+                    ORDER BY
+                        guf.pinned DESC,
+                        CASE guf.status
+                            WHEN 'pinned' THEN 3
+                            WHEN 'confirmed' THEN 2
+                            ELSE 1
+                        END DESC,
+                        guf.importance DESC,
+                        guf.confidence DESC,
+                        guf.evidence_count DESC,
+                        guf.updated_at DESC
+                    LIMIT $3
+                    """,
+                    user_id,
+                    exclude_guild_id,
+                    max(1, int(limit)),
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT global_fact_id, user_id, fact_key, fact_value, fact_type, confidence, importance,
+                           COALESCE(about_target, 'self') AS about_target,
+                           COALESCE(directness, 'explicit') AS directness,
+                           COALESCE(evidence_quote, '') AS evidence_quote,
+                           status, pinned, evidence_count, updated_at, last_seen_at, last_source_guild_id
+                    FROM global_user_facts
+                    WHERE user_id = $1
+                    ORDER BY
+                        pinned DESC,
+                        CASE status
+                            WHEN 'pinned' THEN 3
+                            WHEN 'confirmed' THEN 2
+                            ELSE 1
+                        END DESC,
+                        importance DESC,
+                        confidence DESC,
+                        evidence_count DESC,
+                        updated_at DESC
+                    LIMIT $2
+                    """,
+                    user_id,
+                    max(1, int(limit)),
+                )
 
         if rows:
             return [
@@ -1557,6 +2178,9 @@ class PostgresMemoryStore:
                     "fact_type": str(row["fact_type"]),
                     "confidence": float(row["confidence"]),
                     "importance": float(row["importance"]),
+                    "about_target": str(row["about_target"] or "self"),
+                    "directness": str(row["directness"] or "explicit"),
+                    "evidence_quote": str(row["evidence_quote"] or ""),
                     "status": str(row["status"]),
                     "pinned": bool(row["pinned"]),
                     "evidence_count": int(row["evidence_count"]),
@@ -1573,6 +2197,9 @@ class PostgresMemoryStore:
                 rows = await conn.fetch(
                     """
                     SELECT fact_id, guild_id, fact_key, fact_value, fact_type, confidence, importance,
+                           COALESCE(about_target, 'self') AS about_target,
+                           COALESCE(directness, 'explicit') AS directness,
+                           COALESCE(evidence_quote, '') AS evidence_quote,
                            status, pinned, evidence_count, updated_at, last_seen_at
                     FROM user_facts
                     WHERE user_id = $1
@@ -1598,6 +2225,9 @@ class PostgresMemoryStore:
                 rows = await conn.fetch(
                     """
                     SELECT fact_id, guild_id, fact_key, fact_value, fact_type, confidence, importance,
+                           COALESCE(about_target, 'self') AS about_target,
+                           COALESCE(directness, 'explicit') AS directness,
+                           COALESCE(evidence_quote, '') AS evidence_quote,
                            status, pinned, evidence_count, updated_at, last_seen_at
                     FROM user_facts
                     WHERE user_id = $1
@@ -1633,6 +2263,9 @@ class PostgresMemoryStore:
                     "fact_type": str(row["fact_type"]),
                     "confidence": float(row["confidence"]),
                     "importance": float(row["importance"]),
+                    "about_target": str(row["about_target"] or "self"),
+                    "directness": str(row["directness"] or "explicit"),
+                    "evidence_quote": str(row["evidence_quote"] or ""),
                     "status": str(row["status"]),
                     "pinned": bool(row["pinned"]),
                     "evidence_count": int(row["evidence_count"]),

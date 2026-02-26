@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import aiosqlite
 
-from .utils import _clamp
+from .utils import _clamp, _sqlite_memory_connection
 
 
 class MemorySttMixin:
@@ -19,7 +19,7 @@ class MemorySttMixin:
         status: str,
         message_id: int | None = None,
     ) -> None:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             await db.execute(
                 """
                 INSERT INTO stt_turns (

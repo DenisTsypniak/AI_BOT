@@ -143,14 +143,15 @@ def _spawn(name: str, args: list[str]) -> subprocess.Popen[str]:
 
 
 def main() -> int:
+    default_agent_mode = "start" if os.name == "nt" else "dev"
     parser = argparse.ArgumentParser(
         description="Run LiveKit agent and Discord bot in one terminal with prefixed logs."
     )
     parser.add_argument(
         "--agent-mode",
-        default="dev",
+        default=default_agent_mode,
         choices=["dev", "start"],
-        help="Mode passed to livekit_agent.py (default: dev)",
+        help=f"Mode passed to livekit_agent.py (default: {default_agent_mode})",
     )
     args = parser.parse_args()
 

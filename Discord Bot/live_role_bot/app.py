@@ -30,6 +30,7 @@ from .memory.extractor import MemoryExtractor
 from .memory.factory import build_memory_store
 from .services.gemini_client import GeminiClient
 from .services.local_stt import LocalSTT
+from .services.ollama_extractor_backend import OllamaExtractorBackend
 
 logger = logging.getLogger("live_role_bot")
 
@@ -179,7 +180,16 @@ def build_bot(settings: Settings) -> LiveRoleDiscordBot:
     )
     extractor = MemoryExtractor(
         enabled=settings.memory_enabled,
-        llm=llm,
+        llm=(
+            llm
+            if settings.memory_extractor_backend == "gemini"
+            else OllamaExtractorBackend(
+                base_url=settings.memory_ollama_base_url,
+                model=settings.memory_ollama_model,
+                timeout_seconds=settings.memory_ollama_timeout_seconds,
+                temperature=settings.memory_ollama_temperature,
+            )
+        ),
         candidate_limit=settings.memory_candidate_fact_limit,
     )
     return LiveRoleDiscordBot(

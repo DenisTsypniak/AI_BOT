@@ -6,12 +6,244 @@ import time
 from typing import Any
 
 from ..common import PendingProfileUpdate, PendingSummaryUpdate, as_int, collapse_spaces, truncate
-from ...prompts.memory import build_summary_update_system_prompt, build_summary_update_user_prompt
+from ...prompts.memory import (
+    build_biography_summary_update_system_prompt,
+    build_biography_summary_update_user_prompt,
+    build_summary_update_system_prompt,
+    build_summary_update_user_prompt,
+)
+from ...memory.fact_moderation import CandidateModerationInput, FactModerationPolicyV2
+from ...memory.storage.utils import (
+    normalize_memory_fact_about_target,
+    normalize_memory_fact_directness,
+    sanitize_memory_fact_evidence_quote,
+)
 
 logger = logging.getLogger("live_role_bot")
 
 
 class WorkersMixin:
+    def _memory_extractor_dry_run_enabled(self) -> bool:
+        return bool(getattr(self.settings, "memory_extractor_dry_run_enabled", False))
+
+    def _memory_extractor_audit_enabled(self) -> bool:
+        return bool(getattr(self.settings, "memory_extractor_audit_enabled", True))
+
+    def _fact_moderation_policy(self) -> FactModerationPolicyV2:
+        cached = getattr(self, "_memory_fact_moderation_policy_v2", None)
+        if isinstance(cached, FactModerationPolicyV2):
+            return cached
+        policy = FactModerationPolicyV2.from_settings(self.settings)
+        setattr(self, "_memory_fact_moderation_policy_v2", policy)
+        return policy
+
+    async def _record_memory_extractor_audit(
+        self,
+        *,
+        item: PendingProfileUpdate,
+        fact_owner_kind: str,
+        fact_owner_id: str,
+        backend_name: str,
+        model_name: str,
+        dry_run: bool,
+        diagnostics: object | None,
+        candidates: list[dict[str, object]],
+        accepted_count: int,
+        saved_count: int,
+        filtered_count: int,
+        fallback_error: str = "",
+    ) -> None:
+        if not self._memory_extractor_audit_enabled():
+            return
+        recorder = getattr(self.memory, "record_memory_extractor_run", None)
+        if not callable(recorder):
+            return
+
+        def _as_bool(name: str, default: bool = False) -> bool:
+            try:
+                return bool(getattr(diagnostics, name)) if diagnostics is not None else default
+            except Exception:
+                return default
+
+        def _as_int(name: str, default: int = 0) -> int:
+            try:
+                return int(getattr(diagnostics, name)) if diagnostics is not None else default
+            except Exception:
+                return default
+
+        def _as_str(name: str, default: str = "") -> str:
+            try:
+                raw = getattr(diagnostics, name) if diagnostics is not None else default
+            except Exception:
+                raw = default
+            return str(raw or default)
+
+        try:
+            await recorder(
+                guild_id=item.guild_id,
+                channel_id=item.channel_id,
+                speaker_user_id=item.user_id,
+                fact_owner_kind=str(fact_owner_kind or "user"),
+                fact_owner_id=str(fact_owner_id or item.user_id),
+                speaker_role=str(getattr(item, "speaker_role", "user") or "user"),
+                modality=str(getattr(item, "modality", "text") or "text"),
+                source=str(getattr(item, "source", "unknown") or "unknown"),
+                backend_name=backend_name,
+                model_name=model_name,
+                dry_run=bool(dry_run),
+                llm_attempted=_as_bool("llm_attempted", diagnostics is not None),
+                llm_ok=_as_bool("llm_ok", False),
+                json_valid=_as_bool("json_valid", False),
+                fallback_used=_as_bool("fallback_used", False),
+                latency_ms=_as_int("latency_ms", 0),
+                candidate_count=len(candidates),
+                accepted_count=max(0, int(accepted_count)),
+                saved_count=max(0, int(saved_count)),
+                filtered_count=max(0, int(filtered_count)),
+                error_text=(fallback_error or _as_str("error", ""))[:400],
+                candidates=candidates,
+            )
+        except Exception:
+            logger.exception(
+                "Memory extractor audit log write failed for guild=%s channel=%s user=%s message_id=%s",
+                item.guild_id,
+                item.channel_id,
+                item.user_id,
+                item.message_id,
+            )
+
+    def _persona_memory_subject_user_id(self) -> str:
+        persona_id = str(getattr(self.settings, "persona_id", "") or "persona").strip() or "persona"
+        return f"persona::{persona_id}"
+
+    def _biography_refresh_state(self) -> dict[str, float]:
+        state = getattr(self, "_biography_refresh_monotonic_by_subject", None)
+        if isinstance(state, dict):
+            return state
+        state = {}
+        setattr(self, "_biography_refresh_monotonic_by_subject", state)
+        return state
+
+    def _biography_refresh_allowed(self, subject_key: str) -> bool:
+        try:
+            min_interval = int(getattr(self.settings, "memory_biography_summary_refresh_min_interval_seconds", 90))
+        except (TypeError, ValueError):
+            min_interval = 90
+        if min_interval <= 0:
+            return True
+        now = time.monotonic()
+        state = self._biography_refresh_state()
+        last_ts = float(state.get(subject_key, 0.0) or 0.0)
+        if (now - last_ts) < float(min_interval):
+            return False
+        state[subject_key] = now
+        return True
+
+    async def _refresh_global_biography_summary_from_facts(
+        self,
+        *,
+        subject_kind: str,
+        subject_id: str,
+        facts_user_id: str,
+        source_guild_id: str | None = None,
+    ) -> None:
+        if not bool(getattr(self.settings, "memory_biography_summary_enabled", True)):
+            return
+        kind = str(subject_kind or "").strip().lower()
+        subject = str(subject_id or "").strip()
+        facts_owner = str(facts_user_id or "").strip()
+        if not (kind and subject and facts_owner):
+            return
+        subject_key = f"{kind}:{subject}"
+        if not self._biography_refresh_allowed(subject_key):
+            return
+
+        get_facts = getattr(self.memory, "get_user_facts_global_by_user_id", None)
+        get_bio = getattr(self.memory, "get_global_biography_summary", None)
+        upsert_bio = getattr(self.memory, "upsert_global_biography_summary", None)
+        if not (callable(get_facts) and callable(upsert_bio)):
+            return
+
+        facts = await get_facts(facts_owner, limit=18)
+        if not facts:
+            return
+
+        previous = await get_bio(kind, subject) if callable(get_bio) else None
+        previous_summary = str((previous or {}).get("summary_text") or "").strip()
+        previous_fact_count = as_int((previous or {}).get("source_fact_count"), 0)
+        previous_source_updated = str((previous or {}).get("source_updated_at") or "").strip()
+
+        latest_fact_updated = ""
+        for fact in facts:
+            ts = str(fact.get("updated_at") or "").strip()
+            if ts and ts > latest_fact_updated:
+                latest_fact_updated = ts
+
+        # If nothing materially changed and the previous biography is present, skip regeneration.
+        if (
+            previous_summary
+            and previous_fact_count >= len(facts)
+            and previous_source_updated
+            and latest_fact_updated
+            and previous_source_updated >= latest_fact_updated
+        ):
+            return
+
+        max_chars = max(180, as_int(getattr(self.settings, "memory_biography_summary_max_chars", 520), 520))
+        fact_lines: list[str] = []
+        for fact in facts[:14]:
+            value = str(fact.get("fact_value") or "").strip()
+            if not value:
+                continue
+            fact_type = str(fact.get("fact_type") or "fact").strip().lower() or "fact"
+            conf = float(fact.get("confidence") or 0.0)
+            status = str(fact.get("status") or "candidate").strip().lower() or "candidate"
+            directness = str(fact.get("directness") or "explicit").strip().lower() or "explicit"
+            evidence_count = as_int(fact.get("evidence_count"), 0)
+            if status == "candidate" and directness in {"implicit", "inferred"}:
+                if conf < 0.80 or evidence_count < 2:
+                    continue
+            source_guild = str(fact.get("guild_id") or "").strip()
+            source_suffix = f" | guild={source_guild}" if source_guild else ""
+            directness_suffix = f" | d={directness}" if directness and directness != "explicit" else ""
+            fact_lines.append(f"- [{fact_type} | c={conf:.2f}{directness_suffix}{source_suffix}] {value}")
+        if not fact_lines:
+            return
+
+        prompt_messages: list[dict[str, str]] = [
+            {
+                "role": "system",
+                "content": build_biography_summary_update_system_prompt(
+                    max_chars=max_chars,
+                    subject_kind="persona" if kind == "persona" else "user",
+                ),
+            },
+            {
+                "role": "user",
+                "content": build_biography_summary_update_user_prompt(
+                    subject_kind="persona" if kind == "persona" else "user",
+                    previous_summary=previous_summary,
+                    fact_lines=fact_lines,
+                ),
+            },
+        ]
+        summary = collapse_spaces(await self.llm.chat(prompt_messages, temperature=0.12, max_output_tokens=420))
+        if not summary:
+            return
+        if len(summary) > max_chars:
+            summary = truncate(summary, max_chars)
+
+        await upsert_bio(
+            subject_kind=kind,
+            subject_id=subject,
+            summary_text=summary,
+            source_fact_count=len(facts),
+            source_summary_count=0,
+            source_updated_at=latest_fact_updated or None,
+            last_source_guild_id=(source_guild_id or ""),
+        )
+        logger.info("[memory.bio] subject=%s facts=%s chars=%s", subject_key, len(facts), len(summary))
+
     def _persona_queue_diag_state(self) -> dict[str, Any]:
         state = getattr(self, "_persona_queue_diag", None)
         if isinstance(state, dict):
@@ -45,7 +277,7 @@ class WorkersMixin:
         try:
             counters[key] = int(counters.get(key, 0) or 0) + 1
             counters["__total__"] = int(counters.get("__total__", 0) or 0) + 1
-        except Exception:
+        except (TypeError, ValueError):
             counters[key] = 1
             counters["__total__"] = int(counters.get("__total__", 0) or 0) + 1
         compact_fields: dict[str, object] = {}
@@ -88,7 +320,7 @@ class WorkersMixin:
                     continue
                 try:
                     total += int(value or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     continue
             return total
 
@@ -243,6 +475,13 @@ class WorkersMixin:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                logger.exception(
+                    "Persona ingest worker error for guild=%s channel=%s user=%s message_id=%s",
+                    getattr(item, "guild_id", ""),
+                    getattr(item, "channel_id", ""),
+                    getattr(item, "user_id", ""),
+                    getattr(item, "message_id", 0),
+                )
                 self._record_persona_queue_diag(
                     stage="persona_worker",
                     outcome="error",
@@ -291,8 +530,8 @@ class WorkersMixin:
                     logger.warning("[persona.decay] status=%s reason=%s", status, result.get("reason"))
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
-                logger.debug("Persona decay worker error: %s", exc)
+            except Exception:
+                logger.exception("Persona decay worker error")
 
     async def _persona_reflection_loop(self) -> None:
         while True:
@@ -323,8 +562,8 @@ class WorkersMixin:
                     )
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
-                logger.debug("Persona reflection worker error: %s", exc)
+            except Exception:
+                logger.exception("Persona reflection worker error")
 
     def _enqueue_profile_update(
         self,
@@ -338,6 +577,9 @@ class WorkersMixin:
         modality: str = "text",
         source: str = "unknown",
         quality: float = 1.0,
+        speaker_role: str = "user",
+        fact_owner_kind: str = "user",
+        fact_owner_id: str = "",
     ) -> None:
         if not self.settings.memory_enabled:
             return
@@ -351,8 +593,12 @@ class WorkersMixin:
             modality=modality,
             source=source,
             quality=float(quality),
+            speaker_role=str(speaker_role or "user").strip().lower() or "user",
+            fact_owner_kind=str(fact_owner_kind or "user").strip().lower() or "user",
+            fact_owner_id=str(fact_owner_id or "").strip(),
         )
-        item.persona_ingest_enqueued = self._enqueue_persona_event(item)
+        if item.speaker_role == "user" and item.fact_owner_kind == "user":
+            item.persona_ingest_enqueued = self._enqueue_persona_event(item)
         is_voice = str(modality or "").strip().lower() == "voice"
 
         if self.profile_queue.full():
@@ -401,7 +647,32 @@ class WorkersMixin:
         text = collapse_spaces(item.user_text)
         if len(text) < 6:
             return False
-        if text.startswith(("!", "/", ".", "#")):
+        speaker_role = str(getattr(item, "speaker_role", "user")).strip().lower() or "user"
+        fact_owner_kind = str(getattr(item, "fact_owner_kind", "user")).strip().lower() or "user"
+        if speaker_role == "assistant" and fact_owner_kind == "persona":
+            lower_text = f" {text.casefold()} "
+            first_person_markers = (
+                " я ",
+                " мене ",
+                " мені ",
+                " мій ",
+                " моя ",
+                " моє ",
+                " мої ",
+                " мне ",
+                " меня ",
+                " мой ",
+                " моя ",
+                " i ",
+                " i'm ",
+                " ive ",
+                " i've ",
+                " my ",
+                " me ",
+            )
+            if not any(marker in lower_text for marker in first_person_markers):
+                return False
+        if speaker_role == "user" and text.startswith(("!", "/", ".", "#")):
             return False
 
         lower = text.casefold()
@@ -430,7 +701,7 @@ class WorkersMixin:
             "gg",
             "bruh",
         }
-        if lower in filler:
+        if speaker_role == "user" and lower in filler:
             return False
 
         if item.modality == "voice":
@@ -443,6 +714,34 @@ class WorkersMixin:
 
         return True
 
+    async def _get_profile_extraction_dialogue_context(
+        self,
+        item: PendingProfileUpdate,
+    ) -> list[dict[str, object]] | None:
+        try:
+            limit = int(getattr(self.settings, "memory_extractor_dialogue_window_messages", 6))
+        except (TypeError, ValueError):
+            limit = 6
+        if limit <= 0:
+            return None
+        getter = getattr(self.memory, "get_recent_dialogue_messages", None)
+        if not callable(getter):
+            return None
+        try:
+            rows = await getter(item.guild_id, item.channel_id, item.user_id, max(2, limit))
+        except Exception:
+            logger.exception(
+                "Profile extraction dialogue window retrieval failed for guild=%s channel=%s user=%s message_id=%s",
+                item.guild_id,
+                item.channel_id,
+                item.user_id,
+                item.message_id,
+            )
+            return None
+        if not isinstance(rows, list):
+            return None
+        return rows
+
     async def _profile_worker(self) -> None:
         while True:
             item = await self.profile_queue.get()
@@ -450,7 +749,13 @@ class WorkersMixin:
                 persona_engine = getattr(self, "persona_engine", None)
                 persona_isolation_on = self._persona_queue_isolation_enabled()
                 run_persona_fallback = not (persona_isolation_on and bool(getattr(item, "persona_ingest_enqueued", False)))
-                if persona_engine is not None and bool(getattr(persona_engine, "enabled", False)) and run_persona_fallback:
+                if (
+                    str(getattr(item, "speaker_role", "user")).strip().lower() == "user"
+                    and str(getattr(item, "fact_owner_kind", "user")).strip().lower() == "user"
+                    and persona_engine is not None
+                    and bool(getattr(persona_engine, "enabled", False))
+                    and run_persona_fallback
+                ):
                     if persona_isolation_on:
                         self._record_persona_queue_diag(
                             stage="persona_worker",
@@ -497,42 +802,271 @@ class WorkersMixin:
                             )
                 if not self._should_extract_profile_update(item):
                     continue
-                result = await self.memory_extractor.extract(
-                    user_text=item.user_text,
-                    preferred_language=self.settings.preferred_response_language,
+                owner_kind = str(getattr(item, "fact_owner_kind", "user")).strip().lower() or "user"
+                owner_id = str(getattr(item, "fact_owner_id", "") or "").strip()
+                speaker_role = str(getattr(item, "speaker_role", "user")).strip().lower() or "user"
+                is_persona_self = owner_kind == "persona"
+                dialogue_context = await self._get_profile_extraction_dialogue_context(item)
+                moderation_policy = self._fact_moderation_policy()
+                dry_run = self._memory_extractor_dry_run_enabled()
+                extractor_backend_name = str(getattr(self.memory_extractor, "backend_name", "llm") or "llm").strip().lower()
+                extractor_backend_name = extractor_backend_name or "llm"
+                extractor_model_name = str(getattr(self.memory_extractor, "model_name", "") or "").strip()
+                if is_persona_self:
+                    if not bool(getattr(self.settings, "memory_persona_self_facts_enabled", True)):
+                        continue
+                    fact_owner_user_id = self._persona_memory_subject_user_id()
+                    biography_subject_kind = "persona"
+                    biography_subject_id = owner_id or str(getattr(self.settings, "persona_id", "") or "persona")
+                    extractor_name_base = f"{extractor_backend_name}_persona_self_extractor"
+                    try:
+                        extract_result = await self.memory_extractor.extract_persona_self_facts(
+                            assistant_text=item.user_text,
+                            preferred_language=self.settings.preferred_response_language,
+                            dialogue_context=dialogue_context,
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "Persona self-fact extraction failed for guild=%s channel=%s persona=%s message_id=%s",
+                            item.guild_id,
+                            item.channel_id,
+                            biography_subject_id,
+                            item.message_id,
+                        )
+                        await self._record_memory_extractor_audit(
+                            item=item,
+                            fact_owner_kind=owner_kind,
+                            fact_owner_id=biography_subject_id,
+                            backend_name=extractor_backend_name,
+                            model_name=extractor_model_name,
+                            dry_run=dry_run,
+                            diagnostics=None,
+                            candidates=[],
+                            accepted_count=0,
+                            saved_count=0,
+                            filtered_count=0,
+                            fallback_error=f"{exc.__class__.__name__}: {exc}",
+                        )
+                        continue
+                else:
+                    fact_owner_user_id = item.user_id
+                    biography_subject_kind = "user"
+                    biography_subject_id = item.user_id
+                    extractor_name_base = f"{extractor_backend_name}_profile_extractor"
+                    try:
+                        extract_result = await self.memory_extractor.extract_user_facts(
+                            user_text=item.user_text,
+                            preferred_language=self.settings.preferred_response_language,
+                            dialogue_context=dialogue_context,
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "User fact extraction failed for guild=%s channel=%s user=%s message_id=%s",
+                            item.guild_id,
+                            item.channel_id,
+                            item.user_id,
+                            item.message_id,
+                        )
+                        await self._record_memory_extractor_audit(
+                            item=item,
+                            fact_owner_kind=owner_kind,
+                            fact_owner_id=biography_subject_id,
+                            backend_name=extractor_backend_name,
+                            model_name=extractor_model_name,
+                            dry_run=dry_run,
+                            diagnostics=None,
+                            candidates=[],
+                            accepted_count=0,
+                            saved_count=0,
+                            filtered_count=0,
+                            fallback_error=f"{exc.__class__.__name__}: {exc}",
+                        )
+                        continue
+
+                diagnostics = getattr(extract_result, "diagnostics", None) if extract_result is not None else None
+                if diagnostics is not None:
+                    extractor_backend_name = str(getattr(diagnostics, "backend_name", extractor_backend_name) or extractor_backend_name)
+                    if not extractor_model_name:
+                        extractor_model_name = str(getattr(diagnostics, "model_name", "") or "")
+
+                facts = list(getattr(extract_result, "facts", []) or [])
+                audit_candidates: list[dict[str, object]] = []
+                accepted_for_apply = 0
+                saved = 0
+
+                for fact in facts:
+                    if not fact.value:
+                        audit_candidates.append(
+                            {
+                                "fact_key": str(getattr(fact, "key", "") or ""),
+                                "fact_value": "",
+                                "fact_type": str(getattr(fact, "fact_type", "fact") or "fact"),
+                                "about_target": str(getattr(fact, "about_target", "unknown") or "unknown"),
+                                "directness": str(getattr(fact, "directness", "explicit") or "explicit"),
+                                "evidence_quote": str(getattr(fact, "evidence_quote", "") or ""),
+                                "confidence": float(getattr(fact, "confidence", 0.0) or 0.0),
+                                "importance": float(getattr(fact, "importance", 0.0) or 0.0),
+                                "moderation_action": "reject",
+                                "moderation_reason": "empty_value",
+                                "selected_for_apply": False,
+                                "saved_to_memory": False,
+                            }
+                        )
+                        continue
+                    about_target = normalize_memory_fact_about_target(
+                        str(getattr(fact, "about_target", "") or ""),
+                        default="assistant_self" if is_persona_self else "self",
+                    )
+                    directness = normalize_memory_fact_directness(str(getattr(fact, "directness", "") or ""))
+                    evidence_quote = sanitize_memory_fact_evidence_quote(str(getattr(fact, "evidence_quote", "") or ""))
+                    moderation_reason = ""
+                    selected_for_apply = False
+                    saved_to_memory = False
+
+                    if is_persona_self:
+                        if about_target == "self":
+                            about_target = "assistant_self"
+                        if about_target not in {"assistant_self", "unknown"}:
+                            moderation_reason = "persona_target_filter"
+                        elif float(fact.confidence) < 0.42 and float(fact.importance) < 0.42:
+                            moderation_reason = "persona_low_conf_low_importance"
+                    else:
+                        if about_target == "assistant_self":
+                            moderation_reason = "assistant_self_target_filter"
+                        elif about_target == "other":
+                            moderation_reason = "other_person_target_filter"
+                        elif about_target == "unknown":
+                            fact.confidence = min(float(fact.confidence), 0.58)
+                            if directness == "explicit":
+                                directness = "implicit"
+
+                    decision = None
+                    if not moderation_reason:
+                        decision = moderation_policy.evaluate(
+                            CandidateModerationInput(
+                                fact_key=str(fact.key),
+                                fact_value=str(fact.value),
+                                fact_type=str(fact.fact_type),
+                                about_target=about_target,
+                                directness=directness,
+                                confidence=float(fact.confidence),
+                                importance=float(fact.importance),
+                                evidence_quote=evidence_quote,
+                                owner_kind=owner_kind,
+                                speaker_role=speaker_role,
+                            )
+                        )
+                        if not decision.accepted:
+                            moderation_reason = decision.reason
+
+                    if not moderation_reason:
+                        selected_for_apply = True
+                        extractor_name = extractor_name_base
+                        if item.modality == "voice":
+                            extractor_name = f"{extractor_name}:voice"
+                        if item.source:
+                            extractor_name = f"{extractor_name}:{item.source}"
+                        if not dry_run:
+                            await self.memory.upsert_user_fact(
+                                guild_id=item.guild_id,
+                                user_id=fact_owner_user_id,
+                                fact_key=fact.key,
+                                fact_value=fact.value,
+                                fact_type=fact.fact_type,
+                                confidence=fact.confidence,
+                                importance=fact.importance,
+                                message_id=item.message_id,
+                                extractor=extractor_name[:120],
+                                about_target=about_target,
+                                directness=directness,
+                                evidence_quote=evidence_quote,
+                            )
+                            saved_to_memory = True
+                            saved += 1
+                        accepted_for_apply += 1
+
+                    audit_candidates.append(
+                        {
+                            "fact_key": str(fact.key),
+                            "fact_value": str(fact.value),
+                            "fact_type": str(fact.fact_type),
+                            "about_target": about_target,
+                            "directness": directness,
+                            "evidence_quote": evidence_quote,
+                            "confidence": float(fact.confidence),
+                            "importance": float(fact.importance),
+                            "moderation_action": "accept" if selected_for_apply else "reject",
+                            "moderation_reason": moderation_reason or (decision.reason if decision is not None else "accepted"),
+                            "selected_for_apply": selected_for_apply,
+                            "saved_to_memory": saved_to_memory,
+                        }
+                    )
+
+                await self._record_memory_extractor_audit(
+                    item=item,
+                    fact_owner_kind=owner_kind,
+                    fact_owner_id=biography_subject_id,
+                    backend_name=extractor_backend_name,
+                    model_name=extractor_model_name,
+                    dry_run=dry_run,
+                    diagnostics=diagnostics,
+                    candidates=audit_candidates,
+                    accepted_count=accepted_for_apply,
+                    saved_count=saved,
+                    filtered_count=max(0, len(audit_candidates) - accepted_for_apply),
                 )
-                if result is None or not result.facts:
+
+                if not facts:
                     continue
 
-                saved = 0
-                for fact in result.facts:
-                    if not fact.value:
-                        continue
-                    extractor_name = "gemini_profile_extractor"
-                    if item.modality == "voice":
-                        extractor_name = f"{extractor_name}:voice"
-                    if item.source:
-                        extractor_name = f"{extractor_name}:{item.source}"
-                    await self.memory.upsert_user_fact(
-                        guild_id=item.guild_id,
-                        user_id=item.user_id,
-                        fact_key=fact.key,
-                        fact_value=fact.value,
-                        fact_type=fact.fact_type,
-                        confidence=fact.confidence,
-                        importance=fact.importance,
-                        message_id=item.message_id,
-                        extractor=extractor_name[:120],
+                if saved:
+                    if is_persona_self:
+                        logger.info(
+                            "[memory.persona_facts] persona=%s source_guild=%s saved=%s speaker_role=%s",
+                            biography_subject_id,
+                            item.guild_id,
+                            saved,
+                            speaker_role,
+                        )
+                    else:
+                        label = await self._resolve_user_label(item.guild_id, item.user_id)
+                        logger.info("[memory.facts] user=%s saved=%s", label, saved)
+                elif dry_run and accepted_for_apply:
+                    logger.info(
+                        "[memory.extractor.dry_run] guild=%s channel=%s owner_kind=%s owner_id=%s accepted=%s candidates=%s backend=%s",
+                        item.guild_id,
+                        item.channel_id,
+                        owner_kind,
+                        biography_subject_id,
+                        accepted_for_apply,
+                        len(audit_candidates),
+                        extractor_backend_name,
                     )
-                    saved += 1
 
                 if saved:
-                    label = await self._resolve_user_label(item.guild_id, item.user_id)
-                    logger.info("[memory.facts] user=%s saved=%s", label, saved)
+                    try:
+                        await self._refresh_global_biography_summary_from_facts(
+                            subject_kind=biography_subject_kind,
+                            subject_id=biography_subject_id,
+                            facts_user_id=fact_owner_user_id,
+                            source_guild_id=item.guild_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Biography summary refresh failed for subject=%s:%s",
+                            biography_subject_kind,
+                            biography_subject_id,
+                        )
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
-                logger.debug("Profile worker error: %s", exc)
+            except Exception:
+                logger.exception(
+                    "Profile worker error for guild=%s channel=%s user=%s message_id=%s",
+                    getattr(item, "guild_id", ""),
+                    getattr(item, "channel_id", ""),
+                    getattr(item, "user_id", ""),
+                    getattr(item, "message_id", 0),
+                )
             finally:
                 self.profile_queue.task_done()
 
@@ -617,8 +1151,13 @@ class WorkersMixin:
                 await self._refresh_summary(item.guild_id, item.channel_id, item.user_id)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
-                logger.debug("Summary worker error: %s", exc)
+            except Exception:
+                logger.exception(
+                    "Summary worker error for guild=%s channel=%s user=%s",
+                    getattr(item, "guild_id", ""),
+                    getattr(item, "channel_id", ""),
+                    getattr(item, "user_id", ""),
+                )
             finally:
                 self.summary_pending_keys.discard(key)
                 self.summary_queue.task_done()

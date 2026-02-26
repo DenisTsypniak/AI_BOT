@@ -1,8 +1,27 @@
 from __future__ import annotations
 
 import asyncpg
+import logging
 import re
 import time
+
+logger = logging.getLogger(__name__)
+
+
+def _normalize_limit_offset(limit: int, offset: int, *, default_limit: int, max_limit: int) -> tuple[int, int]:
+    try:
+        safe_limit = int(limit)
+    except (TypeError, ValueError):
+        safe_limit = default_limit
+    try:
+        safe_offset = int(offset)
+    except (TypeError, ValueError):
+        safe_offset = 0
+    if safe_limit <= 0:
+        safe_limit = default_limit
+    safe_limit = min(safe_limit, max_limit)
+    safe_offset = max(0, safe_offset)
+    return safe_limit, safe_offset
 
 
 async def get_dashboard_stats(pool: asyncpg.Pool) -> dict[str, int]:
@@ -21,11 +40,13 @@ async def get_dashboard_stats(pool: asyncpg.Pool) -> dict[str, int]:
             stats["total_messages"] = await conn.fetchval("SELECT COUNT(*) FROM messages")
             stats["total_sessions"] = await conn.fetchval("SELECT COUNT(*) FROM sessions")
         except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("Dashboard stats: core tables missing")
             pass
             
         try:
             stats["total_facts"] = await conn.fetchval("SELECT COUNT(*) FROM user_facts")
         except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("Dashboard stats: user_facts table missing")
             pass
             
         try:
@@ -33,6 +54,7 @@ async def get_dashboard_stats(pool: asyncpg.Pool) -> dict[str, int]:
                 "SELECT COUNT(*) FROM persona_episodes"
             )
         except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("Dashboard stats: persona_episodes table missing")
             pass
             
         try:
@@ -40,12 +62,14 @@ async def get_dashboard_stats(pool: asyncpg.Pool) -> dict[str, int]:
                 "SELECT COUNT(*) FROM persona_reflections"
             )
         except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("Dashboard stats: persona_reflections table missing")
             pass
             
         return stats
 
 
 async def get_users(pool: asyncpg.Pool, limit: int = 50, offset: int = 0) -> list[dict]:
+    limit, offset = _normalize_limit_offset(limit, offset, default_limit=50, max_limit=500)
     async with pool.acquire() as conn:
         try:
             rows = await conn.fetch(
@@ -62,12 +86,14 @@ async def get_users(pool: asyncpg.Pool, limit: int = 50, offset: int = 0) -> lis
             )
             return [dict(row) for row in rows]
         except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_users: users/messages table missing")
             return []
 
 
 async def get_recent_messages(
     pool: asyncpg.Pool, limit: int = 100, offset: int = 0, filters: dict = None
 ) -> list[dict]:
+    limit, offset = _normalize_limit_offset(limit, offset, default_limit=100, max_limit=10000)
     if filters is None:
         filters = {}
         
@@ -100,19 +126,13 @@ async def get_recent_messages(
                 
             # Date Range
             if filters.get("from_date"):
-                try:
-                    where_clauses.append(f"m.created_at >= ${idx}::timestamp")
-                    args.append(filters["from_date"])
-                    idx += 1
-                except Exception:
-                    pass
+                where_clauses.append(f"m.created_at >= ${idx}::timestamp")
+                args.append(filters["from_date"])
+                idx += 1
             if filters.get("to_date"):
-                try:
-                    where_clauses.append(f"m.created_at <= ${idx}::timestamp")
-                    args.append(filters["to_date"])
-                    idx += 1
-                except Exception:
-                    pass
+                where_clauses.append(f"m.created_at <= ${idx}::timestamp")
+                args.append(filters["to_date"])
+                idx += 1
                     
             if where_clauses:
                 base_query += " WHERE " + " AND ".join(where_clauses)
@@ -123,16 +143,19 @@ async def get_recent_messages(
             rows = await conn.fetch(base_query, *args)
             return [dict(row) for row in rows]
         except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_recent_messages: messages/stt_turns table missing")
             return []
 
 
 async def get_user_facts(pool: asyncpg.Pool, limit: int = 100) -> list[dict]:
+    limit, _ = _normalize_limit_offset(limit, 0, default_limit=100, max_limit=500)
     async with pool.acquire() as conn:
         try:
             rows = await conn.fetch(
                 """
                 SELECT f.fact_id, f.guild_id, f.user_id, u.discord_username, 
-                       f.fact_key, f.fact_value, f.fact_type, f.confidence, f.importance, 
+                       f.fact_key, f.fact_value, f.fact_type, f.about_target, f.directness, f.evidence_quote,
+                       f.confidence, f.importance, 
                        f.status, f.pinned, f.evidence_count, f.updated_at
                 FROM user_facts f
                 LEFT JOIN users u ON f.user_id = u.user_id AND f.guild_id = u.guild_id
@@ -143,10 +166,12 @@ async def get_user_facts(pool: asyncpg.Pool, limit: int = 100) -> list[dict]:
             )
             return [dict(row) for row in rows]
         except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_user_facts: user_facts/users table missing")
             return []
 
 
 async def get_persona_episodes(pool: asyncpg.Pool, limit: int = 50) -> list[dict]:
+    limit, _ = _normalize_limit_offset(limit, 0, default_limit=50, max_limit=500)
     async with pool.acquire() as conn:
         try:
             rows = await conn.fetch(
@@ -162,7 +187,298 @@ async def get_persona_episodes(pool: asyncpg.Pool, limit: int = 50) -> list[dict
             )
             return [dict(row) for row in rows]
         except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_persona_episodes: persona_episodes table missing")
             return []
+
+
+async def get_memory_provenance_snapshot(
+    pool: asyncpg.Pool,
+    *,
+    limit: int = 80,
+    offset: int = 0,
+) -> dict[str, list[dict]]:
+    limit, offset = _normalize_limit_offset(limit, offset, default_limit=80, max_limit=300)
+    snapshot: dict[str, list[dict]] = {
+        "global_facts": [],
+        "persona_facts": [],
+        "local_facts": [],
+        "biographies": [],
+    }
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    guf.global_fact_id,
+                    guf.user_id,
+                    CASE
+                        WHEN guf.user_id LIKE 'persona::%' THEN guf.user_id
+                        ELSE COALESCE(gp.primary_display_name, gp.discord_global_name, gp.discord_username, ul.combined_label, ul.discord_username, guf.user_id)
+                    END AS display_name,
+                    guf.fact_key,
+                    guf.fact_value,
+                    guf.fact_type,
+                    guf.about_target,
+                    guf.directness,
+                    guf.evidence_quote,
+                    guf.confidence,
+                    guf.importance,
+                    guf.status,
+                    guf.pinned,
+                    guf.evidence_count,
+                    guf.last_source_guild_id,
+                    guf.updated_at,
+                    COALESCE(ev.total_evidence, 0) AS provenance_evidence_count,
+                    COALESCE(ev.guild_breakdown, '[]'::jsonb) AS provenance_guild_breakdown,
+                    COALESCE(ev.directness_breakdown, '[]'::jsonb) AS provenance_directness_breakdown
+                FROM global_user_facts guf
+                LEFT JOIN global_user_profiles gp ON gp.user_id = guf.user_id
+                LEFT JOIN LATERAL (
+                    SELECT u.combined_label, u.discord_username
+                    FROM users u
+                    WHERE u.user_id = guf.user_id
+                    ORDER BY u.updated_at DESC
+                    LIMIT 1
+                ) ul ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT
+                        COUNT(*)::int AS total_evidence,
+                        COALESCE(
+                            jsonb_agg(
+                                jsonb_build_object('guild_id', e.guild_id, 'count', e.cnt)
+                                ORDER BY e.cnt DESC, e.guild_id
+                            ),
+                            '[]'::jsonb
+                        ) AS guild_breakdown,
+                        COALESCE(
+                            (
+                                SELECT jsonb_agg(
+                                    jsonb_build_object('directness', d.directness, 'count', d.cnt)
+                                    ORDER BY d.cnt DESC, d.directness
+                                )
+                                FROM (
+                                    SELECT COALESCE(directness, 'explicit') AS directness, COUNT(*)::int AS cnt
+                                    FROM global_fact_evidence
+                                    WHERE global_fact_id = guf.global_fact_id
+                                    GROUP BY COALESCE(directness, 'explicit')
+                                ) d
+                            ),
+                            '[]'::jsonb
+                        ) AS directness_breakdown
+                    FROM (
+                        SELECT COALESCE(source_guild_id, '') AS guild_id, COUNT(*)::int AS cnt
+                        FROM global_fact_evidence
+                        WHERE global_fact_id = guf.global_fact_id
+                        GROUP BY COALESCE(source_guild_id, '')
+                    ) e
+                ) ev ON TRUE
+                ORDER BY guf.updated_at DESC
+                LIMIT $1 OFFSET $2
+                """,
+                limit,
+                offset,
+            )
+            for row in rows:
+                item = dict(row)
+                is_persona = str(item.get("user_id") or "").startswith("persona::")
+                item["is_persona_memory"] = is_persona
+                if is_persona:
+                    snapshot["persona_facts"].append(item)
+                else:
+                    snapshot["global_facts"].append(item)
+        except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_memory_provenance_snapshot: global fact tables missing")
+        except Exception:
+            logger.exception("get_memory_provenance_snapshot failed while loading global facts")
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    uf.fact_id,
+                    uf.guild_id,
+                    uf.user_id,
+                    COALESCE(u.combined_label, u.discord_username, uf.user_id) AS display_name,
+                    uf.fact_key,
+                    uf.fact_value,
+                    uf.fact_type,
+                    uf.about_target,
+                    uf.directness,
+                    uf.evidence_quote,
+                    uf.confidence,
+                    uf.importance,
+                    uf.status,
+                    uf.pinned,
+                    uf.evidence_count,
+                    uf.updated_at
+                FROM user_facts uf
+                LEFT JOIN users u ON u.guild_id = uf.guild_id AND u.user_id = uf.user_id
+                ORDER BY uf.updated_at DESC
+                LIMIT $1 OFFSET $2
+                """,
+                limit,
+                offset,
+            )
+            snapshot["local_facts"] = [dict(row) for row in rows]
+        except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_memory_provenance_snapshot: local fact tables missing")
+        except Exception:
+            logger.exception("get_memory_provenance_snapshot failed while loading local facts")
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT subject_kind, subject_id, summary_text, source_fact_count, source_summary_count,
+                       source_updated_at, last_source_guild_id, updated_at
+                FROM global_biography_summaries
+                ORDER BY updated_at DESC
+                LIMIT $1
+                """,
+                max(20, min(limit, 200)),
+            )
+            snapshot["biographies"] = [dict(row) for row in rows]
+        except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_memory_provenance_snapshot: global_biography_summaries table missing")
+        except Exception:
+            logger.exception("get_memory_provenance_snapshot failed while loading biographies")
+
+    return snapshot
+
+
+async def get_memory_extractor_diagnostics_snapshot(
+    pool: asyncpg.Pool,
+    *,
+    run_limit: int = 80,
+    candidate_limit: int = 120,
+) -> dict[str, object]:
+    run_limit, _ = _normalize_limit_offset(run_limit, 0, default_limit=80, max_limit=300)
+    candidate_limit, _ = _normalize_limit_offset(candidate_limit, 0, default_limit=120, max_limit=500)
+    snapshot: dict[str, object] = {
+        "summary": {},
+        "by_backend": [],
+        "recent_runs": [],
+        "dry_run_candidates": [],
+        "rejected_candidates": [],
+    }
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*)::int AS total_runs,
+                    COUNT(*) FILTER (WHERE dry_run)::int AS dry_run_runs,
+                    COUNT(*) FILTER (WHERE llm_attempted)::int AS llm_attempted_runs,
+                    COUNT(*) FILTER (WHERE llm_attempted AND json_valid)::int AS json_valid_runs,
+                    COUNT(*) FILTER (WHERE llm_attempted AND NOT json_valid)::int AS json_invalid_runs,
+                    COUNT(*) FILTER (WHERE error_text <> '')::int AS error_runs,
+                    COALESCE(ROUND(AVG(NULLIF(latency_ms, 0))::numeric, 1), 0)::float8 AS avg_latency_ms,
+                    COALESCE(ROUND(AVG(CASE WHEN llm_attempted THEN (CASE WHEN json_valid THEN 1.0 ELSE 0.0 END) END)::numeric, 4), 0)::float8 AS json_valid_rate,
+                    COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours')::int AS runs_24h,
+                    COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours' AND dry_run)::int AS dry_run_runs_24h,
+                    COALESCE(
+                        ROUND(
+                            AVG(
+                                CASE
+                                    WHEN llm_attempted AND created_at >= NOW() - INTERVAL '24 hours'
+                                    THEN (CASE WHEN json_valid THEN 1.0 ELSE 0.0 END)
+                                END
+                            )::numeric,
+                            4
+                        ),
+                        0
+                    )::float8 AS json_valid_rate_24h
+                FROM memory_extractor_runs
+                """
+            )
+            snapshot["summary"] = dict(row) if row is not None else {}
+        except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_memory_extractor_diagnostics_snapshot: audit tables missing")
+            return snapshot
+        except Exception:
+            logger.exception("get_memory_extractor_diagnostics_snapshot failed while loading summary")
+            return snapshot
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    backend_name,
+                    model_name,
+                    COUNT(*)::int AS runs,
+                    COUNT(*) FILTER (WHERE dry_run)::int AS dry_run_runs,
+                    COUNT(*) FILTER (WHERE llm_attempted AND json_valid)::int AS json_valid_runs,
+                    COUNT(*) FILTER (WHERE llm_attempted AND NOT json_valid)::int AS json_invalid_runs,
+                    COALESCE(ROUND(AVG(NULLIF(latency_ms, 0))::numeric, 1), 0)::float8 AS avg_latency_ms,
+                    COALESCE(ROUND(AVG(CASE WHEN llm_attempted THEN (CASE WHEN json_valid THEN 1.0 ELSE 0.0 END) END)::numeric, 4), 0)::float8 AS json_valid_rate
+                FROM memory_extractor_runs
+                GROUP BY backend_name, model_name
+                ORDER BY runs DESC, backend_name, model_name
+                """
+            )
+            snapshot["by_backend"] = [dict(row) for row in rows]
+        except Exception:
+            logger.exception("get_memory_extractor_diagnostics_snapshot failed while loading backend breakdown")
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    run_id, guild_id, channel_id, speaker_user_id, fact_owner_kind, fact_owner_id, speaker_role,
+                    modality, source, backend_name, model_name, dry_run, llm_attempted, llm_ok, json_valid, fallback_used,
+                    latency_ms, candidate_count, accepted_count, saved_count, filtered_count, error_text, created_at
+                FROM memory_extractor_runs
+                ORDER BY created_at DESC, run_id DESC
+                LIMIT $1
+                """,
+                run_limit,
+            )
+            snapshot["recent_runs"] = [dict(row) for row in rows]
+        except Exception:
+            logger.exception("get_memory_extractor_diagnostics_snapshot failed while loading recent runs")
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.candidate_row_id, c.run_id, c.fact_key, c.fact_value, c.fact_type,
+                    c.about_target, c.directness, c.evidence_quote, c.confidence, c.importance,
+                    c.moderation_action, c.moderation_reason, c.selected_for_apply, c.saved_to_memory, c.created_at,
+                    r.guild_id, r.channel_id, r.speaker_user_id, r.fact_owner_kind, r.fact_owner_id,
+                    r.backend_name, r.model_name, r.dry_run
+                FROM memory_extractor_candidates c
+                JOIN memory_extractor_runs r ON r.run_id = c.run_id
+                WHERE r.dry_run = TRUE
+                ORDER BY c.created_at DESC, c.candidate_row_id DESC
+                LIMIT $1
+                """,
+                candidate_limit,
+            )
+            snapshot["dry_run_candidates"] = [dict(row) for row in rows]
+        except Exception:
+            logger.exception("get_memory_extractor_diagnostics_snapshot failed while loading dry-run candidates")
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.candidate_row_id, c.run_id, c.fact_key, c.fact_value, c.fact_type,
+                    c.about_target, c.directness, c.evidence_quote, c.confidence, c.importance,
+                    c.moderation_action, c.moderation_reason, c.selected_for_apply, c.saved_to_memory, c.created_at,
+                    r.guild_id, r.channel_id, r.speaker_user_id, r.fact_owner_kind, r.fact_owner_id,
+                    r.backend_name, r.model_name, r.dry_run
+                FROM memory_extractor_candidates c
+                JOIN memory_extractor_runs r ON r.run_id = c.run_id
+                WHERE c.moderation_action <> 'accept'
+                ORDER BY c.created_at DESC, c.candidate_row_id DESC
+                LIMIT $1
+                """,
+                candidate_limit,
+            )
+            snapshot["rejected_candidates"] = [dict(row) for row in rows]
+        except Exception:
+            logger.exception("get_memory_extractor_diagnostics_snapshot failed while loading rejected candidates")
+
+    return snapshot
 
 
 async def get_persona_traits(pool: asyncpg.Pool) -> list[dict]:
@@ -180,6 +496,7 @@ async def get_persona_traits(pool: asyncpg.Pool) -> list[dict]:
             )
             return [dict(row) for row in rows]
         except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_persona_traits: persona trait tables missing")
             return []
 
 async def get_message_by_id(pool: asyncpg.Pool, message_id: int) -> dict | None:
@@ -196,6 +513,7 @@ async def get_message_by_id(pool: asyncpg.Pool, message_id: int) -> dict | None:
             )
             return dict(row) if row else None
         except Exception:
+            logger.exception("get_message_by_id failed for message_id=%s", message_id)
             return None
 
 async def get_user_details(pool: asyncpg.Pool, guild_id: str, user_id: str) -> dict | None:
@@ -223,6 +541,7 @@ async def get_user_details(pool: asyncpg.Pool, guild_id: str, user_id: str) -> d
                 "facts": [dict(f) for f in facts]
             }
         except Exception:
+            logger.exception("get_user_details failed for guild_id=%s user_id=%s", guild_id, user_id)
             return None
 
 async def get_row_by_pk(pool: asyncpg.Pool, table: str, pk_col: str, pk_val: int | str) -> dict | None:
@@ -235,6 +554,7 @@ async def get_row_by_pk(pool: asyncpg.Pool, table: str, pk_col: str, pk_val: int
             row = await conn.fetchrow(f"SELECT * FROM {table} WHERE {pk_col} = $1", pk_val)
             return dict(row) if row else None
         except Exception:
+            logger.exception("get_row_by_pk failed for table=%s pk_col=%s pk_val=%s", table, pk_col, pk_val)
             return None
 
 async def get_analytics_data(pool: asyncpg.Pool) -> dict:
@@ -257,7 +577,7 @@ async def get_analytics_data(pool: asyncpg.Pool) -> dict:
             """)
             data["role_distribution"] = [dict(r) for r in role_rows]
         except Exception:
-            pass
+            logger.exception("get_analytics_data failed")
     return data
 
 async def get_tables(pool: asyncpg.Pool) -> list[dict]:
@@ -295,6 +615,7 @@ async def get_table_columns(pool: asyncpg.Pool, table_name: str) -> list[dict]:
 
 async def get_table_rows(pool: asyncpg.Pool, table_name: str, limit: int = 50, offset: int = 0) -> list[dict]:
     # Security: table_name must be validated before calling this
+    limit, offset = _normalize_limit_offset(limit, offset, default_limit=50, max_limit=10000)
     async with pool.acquire() as conn:
         try:
             rows = await conn.fetch(
@@ -303,6 +624,7 @@ async def get_table_rows(pool: asyncpg.Pool, table_name: str, limit: int = 50, o
             )
             return [dict(row) for row in rows]
         except Exception:
+            logger.exception("get_table_rows failed for table=%s limit=%s offset=%s", table_name, limit, offset)
             return []
 
 async def execute_readonly_query(pool: asyncpg.Pool, query: str) -> dict:
@@ -351,6 +673,7 @@ async def execute_readonly_query(pool: asyncpg.Pool, query: str) -> dict:
     async with pool.acquire() as conn:
         try:
             async with conn.transaction():
+                await conn.execute("SET TRANSACTION READ ONLY;")
                 # Enforce server-side 5s timeout
                 await conn.execute("SET LOCAL statement_timeout = '5000';")
                 
@@ -378,12 +701,14 @@ async def execute_readonly_query(pool: asyncpg.Pool, query: str) -> dict:
                 }
                 
         except asyncpg.exceptions.QueryCanceledError:
+             logger.warning("execute_readonly_query timed out")
              return {
                 "success": False, "error": "Query timed out after 5 seconds.",
                 "execution_time_ms": (time.perf_counter() - start_time) * 1000,
                 "columns": [], "rows": []
             }
         except Exception as e:
+            logger.exception("execute_readonly_query failed")
             return {
                 "success": False, "error": str(e),
                 "execution_time_ms": (time.perf_counter() - start_time) * 1000,
@@ -411,11 +736,13 @@ async def delete_user(pool: asyncpg.Pool, guild_id: str, user_id: str) -> bool:
                     try:
                         await conn.execute(f"DELETE FROM {table} WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
                     except asyncpg.exceptions.UndefinedTableError:
+                        logger.debug("delete_user: table missing and skipped (%s)", table)
                         pass
                 
                 try:
                     await conn.execute("DELETE FROM persona_episode_evidence WHERE user_id = $1", user_id)
                 except asyncpg.exceptions.UndefinedTableError:
+                    logger.debug("delete_user: persona_episode_evidence table missing")
                     pass
 
                 result = await conn.execute("""
@@ -423,8 +750,8 @@ async def delete_user(pool: asyncpg.Pool, guild_id: str, user_id: str) -> bool:
                     WHERE guild_id = $1 AND user_id = $2
                 """, guild_id, user_id)
             return result.startswith("DELETE") and not result.endswith(" 0")
-        except Exception as e:
-            print(f"Error executing complete delete: {e}")
+        except Exception:
+            logger.exception("Error executing complete user delete for guild_id=%s user_id=%s", guild_id, user_id)
             return False
 
 async def delete_fact(pool: asyncpg.Pool, guild_id: str, user_id: str, fact_id: int) -> bool:
@@ -437,4 +764,10 @@ async def delete_fact(pool: asyncpg.Pool, guild_id: str, user_id: str, fact_id: 
             """, guild_id, user_id, fact_id)
             return result.startswith("DELETE") and not result.endswith(" 0")
         except Exception:
+            logger.exception(
+                "delete_fact failed for guild_id=%s user_id=%s fact_id=%s",
+                guild_id,
+                user_id,
+                fact_id,
+            )
             return False

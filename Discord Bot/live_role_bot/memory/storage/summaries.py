@@ -4,10 +4,12 @@ from typing import Dict, Optional
 
 import aiosqlite
 
+from .utils import _sqlite_memory_connection
+
 
 class MemorySummariesMixin:
     async def get_dialogue_summary(self, guild_id: str, user_id: str, channel_id: str) -> Optional[Dict[str, object]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """
@@ -35,7 +37,7 @@ class MemorySummariesMixin:
         *,
         exclude_guild_id: str | None = None,
     ) -> Optional[Dict[str, object]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             if exclude_guild_id:
                 query = """
@@ -69,6 +71,94 @@ class MemorySummariesMixin:
             "updated_at": str(row["updated_at"]),
         }
 
+    async def get_global_biography_summary(
+        self,
+        subject_kind: str,
+        subject_id: str,
+    ) -> Optional[Dict[str, object]]:
+        kind = str(subject_kind or "").strip().lower()
+        subject = str(subject_id or "").strip()
+        if not (kind and subject):
+            return None
+
+        async with _sqlite_memory_connection(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT subject_kind, subject_id, summary_text, source_fact_count, source_summary_count,
+                       source_updated_at, last_source_guild_id, created_at, updated_at
+                FROM global_biography_summaries
+                WHERE subject_kind = ? AND subject_id = ?
+                """,
+                (kind, subject),
+            ) as cursor:
+                row = await cursor.fetchone()
+
+        if row is None:
+            return None
+        return {
+            "subject_kind": str(row["subject_kind"]),
+            "subject_id": str(row["subject_id"]),
+            "summary_text": str(row["summary_text"]),
+            "source_fact_count": int(row["source_fact_count"] or 0),
+            "source_summary_count": int(row["source_summary_count"] or 0),
+            "source_updated_at": str(row["source_updated_at"] or ""),
+            "last_source_guild_id": str(row["last_source_guild_id"] or ""),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    async def get_global_user_biography_summary(self, user_id: str) -> Optional[Dict[str, object]]:
+        return await self.get_global_biography_summary("user", user_id)
+
+    async def get_persona_biography_summary(self, persona_id: str) -> Optional[Dict[str, object]]:
+        return await self.get_global_biography_summary("persona", persona_id)
+
+    async def upsert_global_biography_summary(
+        self,
+        *,
+        subject_kind: str,
+        subject_id: str,
+        summary_text: str,
+        source_fact_count: int = 0,
+        source_summary_count: int = 0,
+        source_updated_at: str | None = None,
+        last_source_guild_id: str | None = None,
+    ) -> None:
+        kind = str(subject_kind or "").strip().lower()
+        subject = str(subject_id or "").strip()
+        summary = summary_text.strip()
+        if not (kind and subject and summary):
+            return
+
+        async with _sqlite_memory_connection(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO global_biography_summaries (
+                    subject_kind, subject_id, summary_text, source_fact_count, source_summary_count,
+                    source_updated_at, last_source_guild_id, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(subject_kind, subject_id) DO UPDATE SET
+                    summary_text = excluded.summary_text,
+                    source_fact_count = excluded.source_fact_count,
+                    source_summary_count = excluded.source_summary_count,
+                    source_updated_at = excluded.source_updated_at,
+                    last_source_guild_id = excluded.last_source_guild_id,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    kind,
+                    subject,
+                    summary,
+                    max(0, int(source_fact_count)),
+                    max(0, int(source_summary_count)),
+                    str(source_updated_at).strip() if source_updated_at else None,
+                    str(last_source_guild_id).strip() if last_source_guild_id else None,
+                ),
+            )
+            await db.commit()
+
     async def upsert_dialogue_summary(
         self,
         guild_id: str,
@@ -82,7 +172,7 @@ class MemorySummariesMixin:
         if not cleaned:
             return
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             await db.execute(
                 """
                 INSERT INTO dialogue_summaries (

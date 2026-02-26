@@ -4,7 +4,7 @@ from typing import Dict, List
 
 import aiosqlite
 
-from .utils import _clamp
+from .utils import _clamp, _sqlite_memory_connection
 
 
 class MemoryMessagesMixin:
@@ -15,7 +15,7 @@ class MemoryMessagesMixin:
         mode: str,
         role_id: str,
     ) -> int:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """
@@ -56,7 +56,7 @@ class MemoryMessagesMixin:
         source: str,
         quality: float = 1.0,
     ) -> int:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             cursor = await db.execute(
                 """
                 INSERT INTO messages (
@@ -83,7 +83,7 @@ class MemoryMessagesMixin:
             return int(cursor.lastrowid)
 
     async def get_recent_session_messages(self, session_id: int, limit: int) -> List[Dict[str, object]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """
@@ -114,7 +114,7 @@ class MemoryMessagesMixin:
         ]
 
     async def count_user_messages_in_channel(self, guild_id: str, channel_id: str, user_id: str) -> int:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             async with db.execute(
                 """
                 SELECT COUNT(*)
@@ -133,7 +133,7 @@ class MemoryMessagesMixin:
         user_id: str,
         limit: int,
     ) -> List[Dict[str, object]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with _sqlite_memory_connection(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """

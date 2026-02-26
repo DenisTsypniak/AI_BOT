@@ -46,11 +46,11 @@ class MessageMixin:
         key = f"{stage_key}.{outcome_key}.{reason_key}"
         try:
             counters[key] = int(counters.get(key, 0) or 0) + 1
-        except Exception:
+        except (TypeError, ValueError):
             counters[key] = 1
         try:
             counters["__total__"] = int(counters.get("__total__", 0) or 0) + 1
-        except Exception:
+        except (TypeError, ValueError):
             counters["__total__"] = 1
 
         compact_fields: dict[str, object] = {}
@@ -98,7 +98,7 @@ class MessageMixin:
                     continue
                 try:
                     total += int(value or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     continue
             return total
 
@@ -111,7 +111,7 @@ class MessageMixin:
                 continue
             try:
                 count = int(value or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if ".drop." in key:
                 drop_entries.append((count, key))
@@ -168,7 +168,7 @@ class MessageMixin:
             result = dict(event)
             try:
                 ts_val = float(result.get("ts_unix", 0.0) or 0.0)
-            except Exception:
+            except (TypeError, ValueError):
                 ts_val = 0.0
             if ts_val > 0:
                 result["ts_iso"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts_val))
@@ -365,7 +365,7 @@ class MessageMixin:
                     ts_iso = "?"
                     try:
                         ts_num = float(ts_val or 0.0)
-                    except Exception:
+                    except (TypeError, ValueError):
                         ts_num = 0.0
                     if ts_num > 0:
                         ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts_num))
@@ -741,6 +741,13 @@ class MessageMixin:
                     quality=quality,
                 )
         except Exception as exc:
+            logger.exception(
+                "Failed to save native user transcript message guild=%s channel=%s user=%s source=%s",
+                guild_id,
+                channel_id,
+                user_id,
+                source,
+            )
             self._record_voice_memory_diag(
                 stage="native_user_message",
                 outcome="error",
@@ -777,6 +784,13 @@ class MessageMixin:
                 quality=quality,
             )
         except Exception as exc:
+            logger.exception(
+                "Failed to enqueue profile update from native user transcript guild=%s channel=%s user=%s source=%s",
+                guild_id,
+                channel_id,
+                user_id,
+                source,
+            )
             self._record_voice_memory_diag(
                 stage="profile_queue",
                 outcome="error",
@@ -799,6 +813,13 @@ class MessageMixin:
                 quality=quality,
             )
         except Exception as exc:
+            logger.exception(
+                "Failed to enqueue summary update from native user transcript guild=%s channel=%s user=%s source=%s",
+                guild_id,
+                channel_id,
+                user_id,
+                source,
+            )
             self._record_voice_memory_diag(
                 stage="summary_queue",
                 outcome="error",
@@ -842,7 +863,7 @@ class MessageMixin:
                     mode="voice",
                     role_id=role_id,
                 )
-                await self.memory.save_message(
+                assistant_message_id = await self.memory.save_message(
                     session_id=session_id,
                     guild_id=guild_key,
                     channel_id=channel_key,
@@ -855,7 +876,28 @@ class MessageMixin:
                     source=source,
                     quality=1.0,
                 )
+                if bool(getattr(self.settings, "memory_persona_self_facts_enabled", True)):
+                    self._enqueue_profile_update(
+                        guild_id=guild_key,
+                        channel_id=channel_key,
+                        user_id=str(self.user.id if self.user else 0),
+                        message_id=int(assistant_message_id),
+                        user_text=cleaned,
+                        user_label="assistant",
+                        modality="voice",
+                        source=source,
+                        quality=1.0,
+                        speaker_role="assistant",
+                        fact_owner_kind="persona",
+                        fact_owner_id=str(getattr(self.settings, "persona_id", "") or "persona"),
+                    )
         except Exception as exc:
+            logger.exception(
+                "Failed to save native assistant transcript message guild=%s channel=%s source=%s",
+                guild_id,
+                channel_id,
+                source,
+            )
             self._record_voice_memory_diag(
                 stage="native_assistant_message",
                 outcome="error",
@@ -1066,7 +1108,7 @@ class MessageMixin:
         try:
             if int(message.author.id) in allow_ids:
                 return True
-        except Exception:
+        except (TypeError, ValueError):
             pass
         if isinstance(message.author, discord.Member):
             with contextlib.suppress(Exception):
@@ -1923,6 +1965,13 @@ class MessageMixin:
                 quality=confidence,
             )
         except Exception as exc:
+            logger.exception(
+                "Native audio user transcript callback failed guild=%s channel=%s user=%s source=%s",
+                guild_id,
+                channel_id,
+                user_id,
+                source,
+            )
             self._record_voice_memory_diag(
                 stage="native_user_callback",
                 outcome="error",
@@ -1980,6 +2029,12 @@ class MessageMixin:
                 source=source,
             )
         except Exception as exc:
+            logger.exception(
+                "Native audio assistant transcript callback failed guild=%s channel=%s source=%s",
+                guild_id,
+                channel_id,
+                source,
+            )
             self._record_voice_memory_diag(
                 stage="native_assistant_callback",
                 outcome="error",
@@ -2086,9 +2141,9 @@ class MessageMixin:
                     try:
                         reply = await plugin.execute(message=None, raw_text=user_text, context=ctx)
                         plugin_used = reply is not None
-                    except Exception as e:
+                    except Exception:
                         plugin_used = True
-                        logger.error("Plugin %s failed to execute: %s", plugin.name, e)
+                        logger.exception("Plugin %s failed to execute", plugin.name)
                         reply = "Ой, сталася помилка при виконанні внутрішньої команди."
 
             # --- FALLBACK TO LLM ---
@@ -2101,7 +2156,7 @@ class MessageMixin:
             self._register_bot_reply_state(channel_key, reply)
 
             bot_user_id = str(self.user.id if self.user else 0)
-            await self.memory.save_message(
+            bot_message_id = await self.memory.save_message(
                 session_id=session_id,
                 guild_id=guild_key,
                 channel_id=channel_key,
@@ -2114,5 +2169,20 @@ class MessageMixin:
                 source="plugin" if plugin_used else "gemini",
                 quality=1.0,
             )
+            if bool(getattr(self.settings, "memory_persona_self_facts_enabled", True)):
+                self._enqueue_profile_update(
+                    guild_id=guild_key,
+                    channel_id=channel_key,
+                    user_id=bot_user_id,
+                    message_id=int(bot_message_id),
+                    user_text=reply,
+                    user_label="assistant",
+                    modality="text",
+                    source="plugin" if plugin_used else "gemini",
+                    quality=1.0,
+                    speaker_role="assistant",
+                    fact_owner_kind="persona",
+                    fact_owner_id=str(getattr(self.settings, "persona_id", "") or "persona"),
+                )
             logger.info("[msg.bot] channel=%s text=\"%s\"", channel_key, truncate(reply, 120))
             return reply

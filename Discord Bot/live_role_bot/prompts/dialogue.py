@@ -32,7 +32,10 @@ _DEFAULTS: dict[str, Any] = {
     },
     "known_participant_fact_line_template": "- {label}: {fact_text}",
     "user_dialogue_summary_line_template": "User dialogue memory summary: {summary_text}",
+    "user_biography_summary_line_template": "User biography memory summary: {summary_text}",
+    "persona_biography_summary_line_template": "Your persistent autobiography summary: {summary_text}",
     "relevant_facts_section_header": "User memory facts relevant for this turn:",
+    "persona_relevant_facts_section_header": "Your autobiographical continuity facts:",
     "relevant_fact_line_template": "- [{fact_type} | c={confidence:.2f}] {fact_value}",
 }
 
@@ -95,9 +98,38 @@ def build_user_dialogue_summary_line(summary_text: str) -> str:
     return template.format(summary_text=summary_text)
 
 
+def build_user_biography_summary_line(summary_text: str) -> str:
+    template = str(
+        _cfg().get("user_biography_summary_line_template", _DEFAULTS["user_biography_summary_line_template"])
+    )
+    return template.format(summary_text=summary_text)
+
+
+def build_persona_biography_summary_line(summary_text: str) -> str:
+    template = str(
+        _cfg().get("persona_biography_summary_line_template", _DEFAULTS["persona_biography_summary_line_template"])
+    )
+    return template.format(summary_text=summary_text)
+
+
 def build_relevant_facts_section(facts: list[dict[str, Any]]) -> str:
     cfg = _cfg()
     header = str(cfg.get("relevant_facts_section_header", _DEFAULTS["relevant_facts_section_header"]))
+    line_template = str(cfg.get("relevant_fact_line_template", _DEFAULTS["relevant_fact_line_template"]))
+    fact_lines = [
+        line_template.format(
+            fact_type=fact["fact_type"],
+            confidence=float(fact["confidence"]),
+            fact_value=fact["fact_value"],
+        )
+        for fact in facts
+    ]
+    return header + "\n" + "\n".join(fact_lines)
+
+
+def build_persona_relevant_facts_section(facts: list[dict[str, Any]]) -> str:
+    cfg = _cfg()
+    header = str(cfg.get("persona_relevant_facts_section_header", _DEFAULTS["persona_relevant_facts_section_header"]))
     line_template = str(cfg.get("relevant_fact_line_template", _DEFAULTS["relevant_fact_line_template"]))
     fact_lines = [
         line_template.format(

@@ -142,6 +142,7 @@ class VoiceMixin:
                     getattr(target, "id", "unknown"),
                     exc,
                 )
+                logger.debug("Voice connect attempt exception details", exc_info=exc)
 
             current = guild.voice_client
             if current is not None:
@@ -204,8 +205,8 @@ class VoiceMixin:
                     room_name,
                 )
                 bridge_active = True
-            except Exception as exc:
-                logger.error("LiveKit bridge start failed for guild=%s: %s", guild.id, exc)
+            except Exception:
+                logger.exception("LiveKit bridge start failed for guild=%s", guild.id)
                 channel = self.get_channel(text_channel_id)
                 if isinstance(
                     channel,
@@ -237,8 +238,8 @@ class VoiceMixin:
                     send_transcripts_to_text=self.settings.voice_send_transcripts_to_text,
                 )
                 logger.info("Gemini Native Audio session started for guild=%s channel=%s", guild.id, target.id)
-            except Exception as exc:
-                logger.error("Native Audio start failed for guild=%s: %s", guild.id, exc)
+            except Exception:
+                logger.exception("Native Audio start failed for guild=%s", guild.id)
                 channel = self.get_channel(text_channel_id)
                 if isinstance(
                     channel,
@@ -328,7 +329,7 @@ class VoiceMixin:
 
         try:
             rms = int(audioop.rms(pcm_48k_stereo, 2))
-        except Exception:
+        except (audioop.error, TypeError, ValueError):
             rms = 0
 
         silence_threshold = max(20, self.settings.voice_silence_rms)
@@ -613,7 +614,13 @@ class VoiceMixin:
                     await self._send_chunks(messageable, reply)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
-                logger.debug("Voice worker error: %s", exc)
+            except Exception:
+                logger.exception(
+                    "Voice worker error for guild=%s channel=%s user=%s source=%s",
+                    getattr(item, "guild_id", 0),
+                    getattr(item, "channel_id", 0),
+                    getattr(item, "user_id", 0),
+                    getattr(item, "transcript_source", ""),
+                )
             finally:
                 self.voice_turn_queue.task_done()

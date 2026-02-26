@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from typing import Any
 
 import discord
@@ -13,11 +14,16 @@ from ...prompts.dialogue import (
     VOICE_SESSION_BEHAVIOR_LINES,
     build_language_rule,
     build_known_participant_fact_line,
+    build_persona_biography_summary_line,
+    build_persona_relevant_facts_section,
     build_relevant_facts_section,
     build_rp_canon_section,
     build_role_profile_lines,
+    build_user_biography_summary_line,
     build_user_dialogue_summary_line,
 )
+
+logger = logging.getLogger("live_role_bot")
 
 
 class PromptMixin:
@@ -55,6 +61,23 @@ class PromptMixin:
                 return True
         return False
 
+    @staticmethod
+    def _tag_memory_facts(
+        facts: list[dict[str, Any]],
+        *,
+        memory_scope: str,
+        memory_source: str,
+    ) -> list[dict[str, Any]]:
+        tagged: list[dict[str, Any]] = []
+        for fact in facts or []:
+            if not isinstance(fact, dict):
+                continue
+            item = dict(fact)
+            item.setdefault("memory_scope", memory_scope)
+            item.setdefault("memory_source", memory_source)
+            tagged.append(item)
+        return tagged
+
     async def _get_global_identity_fallback_fact(
         self,
         guild_id: str,
@@ -64,8 +87,14 @@ class PromptMixin:
         if not callable(getter):
             return None
         identity = None
-        with contextlib.suppress(Exception):
+        try:
             identity = await getter(user_id, exclude_guild_id=guild_id)
+        except Exception:
+            logger.exception(
+                "Memory identity fallback retrieval failed: guild=%s user=%s",
+                guild_id,
+                user_id,
+            )
         if not identity:
             return None
         primary_name = str(identity.get("discord_global_name") or "").strip() or str(
@@ -84,7 +113,65 @@ class PromptMixin:
             "status": "confirmed",
             "pinned": False,
             "evidence_count": 1,
+            "memory_scope": "global_identity_fallback",
+            "memory_source": "global_user_profiles",
         }
+
+    async def _get_global_biography_summary_row(
+        self,
+        *,
+        subject_kind: str,
+        subject_id: str,
+    ) -> dict[str, Any] | None:
+        getter = getattr(self.memory, "get_global_biography_summary", None)
+        if not callable(getter):
+            return None
+        try:
+            row = await getter(subject_kind, subject_id)
+        except Exception:
+            logger.exception(
+                "Global biography summary retrieval failed: subject=%s:%s",
+                subject_kind,
+                subject_id,
+            )
+            return None
+        if row is None:
+            return None
+        text = str(row.get("summary_text") or "").strip()
+        if not text:
+            return None
+        tagged = dict(row)
+        tagged.setdefault("memory_scope", f"global_{subject_kind}_biography_summary")
+        tagged.setdefault("memory_source", "global_biography_summaries")
+        return tagged
+
+    async def _get_global_user_biography_summary_row(self, user_id: str) -> dict[str, Any] | None:
+        return await self._get_global_biography_summary_row(subject_kind="user", subject_id=user_id)
+
+    async def _get_persona_biography_summary_row(self) -> dict[str, Any] | None:
+        persona_id = str(getattr(self.settings, "persona_id", "") or "").strip()
+        if not persona_id:
+            return None
+        return await self._get_global_biography_summary_row(subject_kind="persona", subject_id=persona_id)
+
+    async def _get_persona_self_facts(self, *, limit: int = 6) -> list[dict[str, Any]]:
+        getter = getattr(self.memory, "get_user_facts_global_by_user_id", None)
+        if not callable(getter):
+            return []
+        persona_user_id = ""
+        helper = getattr(self, "_persona_memory_subject_user_id", None)
+        if callable(helper):
+            with contextlib.suppress(Exception):
+                persona_user_id = str(helper() or "").strip()
+        if not persona_user_id:
+            persona_id = str(getattr(self.settings, "persona_id", "") or "persona").strip() or "persona"
+            persona_user_id = f"persona::{persona_id}"
+        try:
+            rows = await getter(persona_user_id, limit=max(1, int(limit)))
+        except Exception:
+            logger.exception("Persona self-facts retrieval failed for persona_user_id=%s", persona_user_id)
+            return []
+        return self._tag_memory_facts(list(rows), memory_scope="persona_self_memory", memory_source="global_user_facts")
 
     async def _get_summary_with_global_fallback(
         self,
@@ -92,16 +179,56 @@ class PromptMixin:
         user_id: str,
         channel_id: str,
     ) -> dict[str, Any] | None:
-        summary_row = await self.memory.get_dialogue_summary(guild_id, user_id, channel_id)
+        summary_row = None
+        try:
+            summary_row = await self.memory.get_dialogue_summary(guild_id, user_id, channel_id)
+        except Exception:
+            logger.exception(
+                "Local dialogue summary retrieval failed: guild=%s channel=%s user=%s",
+                guild_id,
+                channel_id,
+                user_id,
+            )
+            return None
         if summary_row is not None and str(summary_row.get("summary_text") or "").strip():
+            tagged = dict(summary_row)
+            tagged.setdefault("memory_scope", "local_dialogue_summary")
+            tagged.setdefault("memory_source", "dialogue_summaries")
+            return tagged
+        allow_cross_server_summary = bool(
+            getattr(self.settings, "memory_cross_server_dialogue_summary_fallback_enabled", False)
+        )
+        if not allow_cross_server_summary:
+            logger.debug(
+                "Cross-server dialogue summary fallback disabled by policy: guild=%s channel=%s user=%s",
+                guild_id,
+                channel_id,
+                user_id,
+            )
             return summary_row
         getter = getattr(self.memory, "get_latest_dialogue_summary_by_user_id", None)
         if not callable(getter):
             return summary_row
-        with contextlib.suppress(Exception):
+        try:
             global_row = await getter(user_id, exclude_guild_id=guild_id)
             if global_row is not None and str(global_row.get("summary_text") or "").strip():
-                return global_row
+                tagged = dict(global_row)
+                tagged.setdefault("memory_scope", "cross_server_dialogue_summary_fallback")
+                tagged.setdefault("memory_source", "dialogue_summaries")
+                logger.debug(
+                    "Using cross-server dialogue summary fallback: current_guild=%s source_guild=%s user=%s",
+                    guild_id,
+                    str(tagged.get("guild_id") or ""),
+                    user_id,
+                )
+                return tagged
+        except Exception:
+            logger.exception(
+                "Cross-server dialogue summary fallback retrieval failed: guild=%s channel=%s user=%s",
+                guild_id,
+                channel_id,
+                user_id,
+            )
         return summary_row
 
     async def _get_user_facts_with_global_fallback(
@@ -113,6 +240,11 @@ class PromptMixin:
         target_count: int,
     ) -> list[dict[str, Any]]:
         local_facts = await self.memory.get_user_facts(guild_id, user_id, limit=max(1, int(local_limit)))
+        local_facts = self._tag_memory_facts(
+            list(local_facts),
+            memory_scope="guild_local_memory",
+            memory_source="user_facts",
+        )
         getter = getattr(self.memory, "get_user_facts_global_by_user_id", None)
         if not callable(getter):
             merged = list(local_facts)
@@ -126,11 +258,22 @@ class PromptMixin:
                     )
             return merged
         global_facts: list[dict[str, Any]] = []
-        with contextlib.suppress(Exception):
+        try:
             global_facts = await getter(
                 user_id,
                 limit=max(1, int(max(local_limit, target_count))),
                 exclude_guild_id=guild_id,
+            )
+            global_facts = self._tag_memory_facts(
+                list(global_facts),
+                memory_scope="global_user_memory_fallback",
+                memory_source="global_user_facts",
+            )
+        except Exception:
+            logger.exception(
+                "Global facts fallback retrieval failed: guild=%s user=%s",
+                guild_id,
+                user_id,
             )
         merged = self._merge_memory_fact_lists(
             local_facts,
@@ -141,6 +284,14 @@ class PromptMixin:
             fallback_identity = await self._get_global_identity_fallback_fact(guild_id, user_id)
             if fallback_identity:
                 merged = self._merge_memory_fact_lists([fallback_identity], merged, limit=max(local_limit, target_count))
+        logger.debug(
+            "Memory facts prepared for prompt: guild=%s user=%s local=%d global=%d merged=%d",
+            guild_id,
+            user_id,
+            len(local_facts),
+            len(global_facts),
+            len(merged),
+        )
         return merged
 
     def _build_session_state_block(self, channel_id: str) -> str:
@@ -221,6 +372,14 @@ class PromptMixin:
                 *VOICE_SESSION_BEHAVIOR_LINES,
             ]
 
+        if bool(getattr(self.settings, "memory_enabled", True)):
+            persona_bio = await self._get_persona_biography_summary_row()
+            if persona_bio is not None:
+                lines.append(build_persona_biography_summary_line(str(persona_bio.get("summary_text") or "").strip()))
+            persona_self_facts = await self._get_persona_self_facts(limit=4)
+            if persona_self_facts:
+                lines.append(build_persona_relevant_facts_section(persona_self_facts))
+
         members = getattr(voice_channel, "members", [])
         if isinstance(members, list):
             profile_lines: list[str] = []
@@ -286,9 +445,18 @@ class PromptMixin:
             }
 
         summary_row = await self._get_summary_with_global_fallback(guild_id, user_id, channel_id)
+        user_bio_row = None
+        persona_bio_row = None
+        persona_self_facts: list[dict[str, Any]] = []
+        if bool(getattr(self.settings, "memory_enabled", True)):
+            user_bio_row = await self._get_global_user_biography_summary_row(user_id)
+            persona_bio_row = await self._get_persona_biography_summary_row()
+            persona_self_facts = await self._get_persona_self_facts(limit=6)
         summary_text = ""
         if self.settings.summary_enabled and summary_row is not None:
             summary_text = str(summary_row.get("summary_text") or "").strip()
+        user_bio_text = str((user_bio_row or {}).get("summary_text") or "").strip()
+        persona_bio_text = str((persona_bio_row or {}).get("summary_text") or "").strip()
 
         facts = await self._select_relevant_facts(guild_id, user_id, user_text)
         history = await self.memory.get_recent_session_messages(session_id, self.settings.max_recent_messages)
@@ -314,6 +482,12 @@ class PromptMixin:
                 self._build_session_state_block(channel_id),
             ]
 
+        if persona_bio_text:
+            system_parts.append(build_persona_biography_summary_line(persona_bio_text))
+        if persona_self_facts:
+            system_parts.append(build_persona_relevant_facts_section(persona_self_facts))
+        if user_bio_text:
+            system_parts.append(build_user_biography_summary_line(user_bio_text))
         if summary_text:
             system_parts.append(build_user_dialogue_summary_line(summary_text))
         if facts:

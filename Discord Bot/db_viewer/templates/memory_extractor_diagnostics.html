@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+
+{% block title %}Memory Extractor Diagnostics - Live Role Bot{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1 class="page-title">Memory Extractor Diagnostics</h1>
+    <p class="page-description">Ollama health-check, extractor latency/JSON quality, dry-run outputs and moderation rejects.</p>
+    <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
+        <a href="/memory" class="btn">Back To Memory</a>
+        <a href="/memory/provenance" class="btn">Provenance</a>
+        <a href="/memory/extractor?run_limit={{ run_limit }}&candidate_limit={{ candidate_limit }}" class="btn">Refresh</a>
+    </div>
+</div>
+
+<div class="table-container" style="margin-bottom:24px;">
+    <table>
+        <thead>
+            <tr>
+                <th>Ollama Health</th>
+                <th>Configured Backend</th>
+                <th>Base URL</th>
+                <th>Model</th>
+                <th>Ping</th>
+                <th>Latency</th>
+                <th>Info</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>
+                    {% if ollama_health.ping_ok %}
+                    <span class="badge green">OK</span>
+                    {% else %}
+                    <span class="badge yellow">Not Ready</span>
+                    {% endif %}
+                </td>
+                <td><span class="badge">{{ ollama_health.configured_backend or '' }}</span></td>
+                <td style="font-family: monospace;">{{ ollama_health.base_url or '' }}</td>
+                <td style="font-family: monospace;">{{ ollama_health.model or '' }}</td>
+                <td>
+                    {% if ollama_health.model_available %}
+                    <span class="badge green">model found</span>
+                    {% else %}
+                    <span class="badge">{{ 'n/a' if ollama_health.configured_backend != 'ollama' else 'missing/unreachable' }}</span>
+                    {% endif %}
+                </td>
+                <td>{{ ollama_health.latency_ms if ollama_health.latency_ms is not none else '' }}{% if ollama_health.latency_ms is not none %} ms{% endif %}</td>
+                <td class="text-wrap" style="font-size:0.85rem; color: var(--text-muted);">
+                    {% if ollama_health.error %}{{ ollama_health.error }}{% endif %}
+                    {% if ollama_health.parameter_size %}<div>params={{ ollama_health.parameter_size }}</div>{% endif %}
+                    {% if ollama_health.quantization_level %}<div>quant={{ ollama_health.quantization_level }}</div>{% endif %}
+                    {% if ollama_health.family %}<div>family={{ ollama_health.family }}</div>{% endif %}
+                </td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+<h2 style="margin-top: 0;">Extractor Summary</h2>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Total Runs</th>
+                <th>Dry Runs</th>
+                <th>LLM Attempted</th>
+                <th>JSON Valid Rate</th>
+                <th>JSON Valid Rate (24h)</th>
+                <th>Avg Latency</th>
+                <th>Error Runs</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>{{ summary.total_runs or 0 }}</td>
+                <td>{{ summary.dry_run_runs or 0 }}</td>
+                <td>{{ summary.llm_attempted_runs or 0 }}</td>
+                <td>{{ "%.1f"|format((summary.json_valid_rate or 0) * 100) }}%</td>
+                <td>{{ "%.1f"|format((summary.json_valid_rate_24h or 0) * 100) }}%</td>
+                <td>{{ summary.avg_latency_ms or 0 }} ms</td>
+                <td>{{ summary.error_runs or 0 }}</td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+<h2 style="margin-top: 32px;">By Backend / Model</h2>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Backend</th>
+                <th>Model</th>
+                <th>Runs</th>
+                <th>Dry Runs</th>
+                <th>JSON Valid Rate</th>
+                <th>Avg Latency</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in by_backend %}
+            <tr>
+                <td><span class="badge">{{ row.backend_name }}</span></td>
+                <td style="font-family: monospace;">{{ row.model_name or '' }}</td>
+                <td>{{ row.runs or 0 }}</td>
+                <td>{{ row.dry_run_runs or 0 }}</td>
+                <td>{{ "%.1f"|format((row.json_valid_rate or 0) * 100) }}%</td>
+                <td>{{ row.avg_latency_ms or 0 }} ms</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="6" style="text-align:center; padding:24px; color:var(--text-muted);">No extractor runs logged yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2 style="margin-top: 32px;">Recent Extractor Runs</h2>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Time</th>
+                <th>Backend</th>
+                <th>Owner</th>
+                <th>Source</th>
+                <th>Flags</th>
+                <th>Latency</th>
+                <th>Candidates</th>
+                <th>Error</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in recent_runs %}
+            <tr>
+                <td style="font-size:0.85rem; color:var(--text-muted);">{{ row.created_at|kyiv_time }}</td>
+                <td>
+                    <div class="badge">{{ row.backend_name }}</div>
+                    <div style="font-size:0.75rem; color:var(--text-muted); font-family:monospace; margin-top:4px;">{{ row.model_name }}</div>
+                </td>
+                <td>
+                    <span class="badge {% if row.fact_owner_kind == 'persona' %}blue{% else %}green{% endif %}">{{ row.fact_owner_kind }}</span>
+                    <div style="font-size:0.75rem; color:var(--text-muted); font-family:monospace; margin-top:4px;">{{ row.fact_owner_id }}</div>
+                </td>
+                <td>
+                    <div>{{ row.modality }}/{{ row.source }}</div>
+                    <div style="font-size:0.75rem; color:var(--text-muted); font-family:monospace;">g={{ row.guild_id }} c={{ row.channel_id }}</div>
+                </td>
+                <td>
+                    {% if row.dry_run %}<span class="badge yellow">dry-run</span>{% endif %}
+                    <div style="margin-top:4px; display:flex; gap:4px; flex-wrap:wrap;">
+                        <span class="badge {% if row.json_valid %}green{% else %}yellow{% endif %}">json={{ 'ok' if row.json_valid else 'bad' }}</span>
+                        <span class="badge">llm={{ 'ok' if row.llm_ok else 'fail' }}</span>
+                        {% if row.fallback_used %}<span class="badge blue">fallback</span>{% endif %}
+                    </div>
+                </td>
+                <td>{{ row.latency_ms or 0 }} ms</td>
+                <td>
+                    <div>cand={{ row.candidate_count or 0 }}</div>
+                    <div style="font-size:0.8rem; color:var(--text-muted);">accept={{ row.accepted_count or 0 }} save={{ row.saved_count or 0 }} drop={{ row.filtered_count or 0 }}</div>
+                </td>
+                <td class="text-wrap" style="max-width:280px; font-size:0.82rem; color:var(--text-muted);">{{ row.error_text or '' }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="8" style="text-align:center; padding:24px; color:var(--text-muted);">No extractor runs logged yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2 style="margin-top: 32px;">Dry-Run Candidates</h2>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Time</th>
+                <th>Owner</th>
+                <th>Fact</th>
+                <th>Value</th>
+                <th>Meta</th>
+                <th>Decision</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in dry_run_candidates %}
+            <tr>
+                <td style="font-size:0.85rem; color:var(--text-muted);">{{ row.created_at|kyiv_time }}</td>
+                <td>
+                    <span class="badge">{{ row.fact_owner_kind }}</span>
+                    <div style="font-size:0.75rem; color:var(--text-muted); font-family:monospace; margin-top:4px;">{{ row.fact_owner_id }}</div>
+                </td>
+                <td><span class="badge">{{ row.fact_key }}</span></td>
+                <td class="text-wrap">{{ row.fact_value }}</td>
+                <td>
+                    <div class="badge blue" style="margin:2px 4px 2px 0;">{{ row.about_target }}</div>
+                    <div class="badge" style="margin:2px 4px 2px 0;">{{ row.directness }}</div>
+                    <div style="font-size:0.8rem; color:var(--text-muted); margin-top:4px;">c={{ "%.2f"|format(row.confidence or 0) }} i={{ "%.2f"|format(row.importance or 0) }}</div>
+                    {% if row.evidence_quote %}
+                    <div class="text-wrap" style="font-size:0.78rem; color:var(--text-muted); margin-top:4px;">"{{ row.evidence_quote }}"</div>
+                    {% endif %}
+                </td>
+                <td>
+                    <span class="badge {% if row.moderation_action == 'accept' %}green{% else %}yellow{% endif %}">{{ row.moderation_action }}</span>
+                    <div style="font-size:0.78rem; color:var(--text-muted); margin-top:4px;">{{ row.moderation_reason or '' }}</div>
+                    <div style="font-size:0.78rem; color:var(--text-muted);">selected={{ 1 if row.selected_for_apply else 0 }}, saved={{ 1 if row.saved_to_memory else 0 }}</div>
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="6" style="text-align:center; padding:24px; color:var(--text-muted);">No dry-run candidates yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2 style="margin-top: 32px;">Recent Rejected Candidates</h2>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Time</th>
+                <th>Backend</th>
+                <th>Fact</th>
+                <th>Meta</th>
+                <th>Reason</th>
+                <th>Value</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rejected_candidates %}
+            <tr>
+                <td style="font-size:0.85rem; color:var(--text-muted);">{{ row.created_at|kyiv_time }}</td>
+                <td>
+                    <span class="badge">{{ row.backend_name }}</span>
+                    {% if row.dry_run %}<span class="badge yellow">dry</span>{% endif %}
+                    <div style="font-size:0.75rem; color:var(--text-muted); font-family:monospace; margin-top:4px;">{{ row.model_name }}</div>
+                </td>
+                <td><span class="badge">{{ row.fact_key }}</span></td>
+                <td>
+                    <div class="badge blue" style="margin:2px 4px 2px 0;">{{ row.about_target }}</div>
+                    <div class="badge" style="margin:2px 4px 2px 0;">{{ row.directness }}</div>
+                    <div style="font-size:0.8rem; color:var(--text-muted); margin-top:4px;">c={{ "%.2f"|format(row.confidence or 0) }} i={{ "%.2f"|format(row.importance or 0) }}</div>
+                </td>
+                <td class="text-wrap" style="max-width:260px;">{{ row.moderation_reason or row.moderation_action }}</td>
+                <td class="text-wrap">{{ row.fact_value }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="6" style="text-align:center; padding:24px; color:var(--text-muted);">No rejected candidates logged.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
