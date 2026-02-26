@@ -908,7 +908,9 @@ class PersonaGrowthEngine:
             },
         ]
         started = time.monotonic()
-        model_name = str(getattr(self.settings, "gemini_model", "") or "gemini")
+        model_name = str(
+            getattr(self.llm, "model", "") or getattr(self.settings, "gemini_model", "") or "llm"
+        )
         prompt_version = "persona_reflection_llm_v1"
         try:
             payload = await self.llm.json_chat(  # type: ignore[union-attr]

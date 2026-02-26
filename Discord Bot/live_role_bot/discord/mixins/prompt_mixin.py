@@ -396,11 +396,14 @@ class PromptMixin:
                     local_limit=3,
                     target_count=3,
                 )
-                fact_text = "; ".join(
-                    str(item.get("fact_value") or "").strip()
-                    for item in facts
-                    if item.get("fact_value")
-                )
+                fact_parts: list[str] = []
+                for item in facts:
+                    value = str(item.get("fact_value") or "").strip()
+                    if not value:
+                        continue
+                    key = str(item.get("fact_key") or "").strip()
+                    fact_parts.append(f"{key}={value}" if key else value)
+                fact_text = "; ".join(fact_parts)
                 if fact_text:
                     profile_lines.append(build_known_participant_fact_line(label, fact_text))
                     added += 1

@@ -210,10 +210,7 @@ async def _fetch_paginated_rows(
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    if not app_state.pool:
-        return HTMLResponse("Database pool not initialized", status_code=500)
-    stats = await queries.get_dashboard_stats(app_state.pool)
-    return render(request, "index.html", {"stats": stats})
+    return RedirectResponse(url="/users", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
 @app.get("/users", response_class=HTMLResponse)
@@ -419,6 +416,112 @@ async def persona(request: Request):
     return render(request, "persona.html", {"traits": traits})
 
 
+@app.get("/persona/card", response_class=HTMLResponse)
+async def persona_card(request: Request):
+    if not app_state.pool:
+        return HTMLResponse("Database pool not initialized", status_code=500)
+
+    traits = await queries.get_persona_traits(app_state.pool)
+    episodes = await queries.get_persona_episodes(app_state.pool, limit=6)
+    memory_snapshot = await queries.get_persona_memory_snapshot(
+        app_state.pool,
+        fact_limit=14,
+        fact_offset=0,
+        run_limit=8,
+        candidate_limit=12,
+    )
+
+    def _as_float(value: object) -> float:
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    traits_sorted = sorted(
+        traits,
+        key=lambda t: (abs(_as_float(t.get("current_value"))), _as_float(t.get("evidence_count"))),
+        reverse=True,
+    )
+    dominant_traits = traits_sorted[:8]
+    emerging_traits = [t for t in traits if str(t.get("status") or "") == "emerging"][:6]
+    active_traits = [t for t in traits if str(t.get("status") or "") == "active"]
+
+    persona_facts = list(memory_snapshot.get("facts", []))
+    persona_biographies = list(memory_snapshot.get("biographies", []))
+    persona_biography = persona_biographies[0] if persona_biographies else None
+    recent_runs = list(memory_snapshot.get("recent_runs", []))
+    recent_candidates = list(memory_snapshot.get("recent_candidates", []))
+
+    key_focus_tokens = ("preference", "like", "food", "identity", "bio", "style", "value")
+    highlight_facts = [
+        fact
+        for fact in persona_facts
+        if any(token in str(fact.get("fact_key") or "").lower() for token in key_focus_tokens)
+    ]
+    if not highlight_facts:
+        highlight_facts = persona_facts[:8]
+
+    summary = dict(memory_snapshot.get("summary", {}) or {})
+    summary.setdefault("traits_total", len(traits))
+    summary.setdefault("traits_active", len(active_traits))
+    summary.setdefault("traits_emerging", len(emerging_traits))
+    summary.setdefault("episodes_total_preview", len(episodes))
+    summary.setdefault("recent_runs_preview", len(recent_runs))
+
+    return render(
+        request,
+        "persona_card.html",
+        {
+            "summary": summary,
+            "persona_biography": persona_biography,
+            "dominant_traits": dominant_traits,
+            "emerging_traits": emerging_traits,
+            "highlight_facts": highlight_facts[:10],
+            "persona_facts": persona_facts[:12],
+            "recent_runs": recent_runs[:8],
+            "recent_candidates": recent_candidates[:10],
+            "episodes": episodes,
+        },
+    )
+
+
+@app.get("/persona/memory", response_class=HTMLResponse)
+async def persona_memory(request: Request, fact_limit: int = 120, fact_offset: int = 0, run_limit: int = 40, candidate_limit: int = 80):
+    if not app_state.pool:
+        return HTMLResponse("Database pool not initialized", status_code=500)
+    fact_limit, fact_offset = _normalize_paging(fact_limit, fact_offset, default_limit=120, max_limit=500)
+    run_limit, _ = _normalize_paging(run_limit, 0, default_limit=40, max_limit=200)
+    candidate_limit, _ = _normalize_paging(candidate_limit, 0, default_limit=80, max_limit=300)
+    snapshot = await queries.get_persona_memory_snapshot(
+        app_state.pool,
+        fact_limit=fact_limit,
+        fact_offset=fact_offset,
+        run_limit=run_limit,
+        candidate_limit=candidate_limit,
+    )
+    facts = snapshot.get("facts", [])
+    recent_candidates = snapshot.get("recent_candidates", [])
+    rejected_candidates = snapshot.get("rejected_candidates", [])
+    return render(
+        request,
+        "persona_memory.html",
+        {
+            "fact_limit": fact_limit,
+            "fact_offset": fact_offset,
+            "run_limit": run_limit,
+            "candidate_limit": candidate_limit,
+            "prev_fact_offset": max(0, fact_offset - fact_limit),
+            "summary": snapshot.get("summary", {}),
+            "biographies": snapshot.get("biographies", []),
+            "facts": facts,
+            "recent_runs": snapshot.get("recent_runs", []),
+            "recent_candidates": recent_candidates,
+            "rejected_candidates": rejected_candidates,
+            "has_next_facts_page": len(facts) >= fact_limit,
+        },
+    )
+
+
 @app.get("/persona/reflections", response_class=HTMLResponse)
 async def persona_reflections(request: Request, limit: int = 50, offset: int = 0):
     if not app_state.pool:
@@ -584,43 +687,6 @@ async def query_tool_post(request: Request):
         "query": query_str,
         "result": result
     })
-
-
-@app.get("/health", response_class=HTMLResponse)
-async def health(request: Request):
-    db_status = "unknown"
-    ping_ms = 0
-    pool_size = 0
-    idle_size = 0
-    
-    if not app_state.pool:
-        db_status = "Disconnected (No pool)"
-    else:
-        try:
-            start = time.perf_counter()
-            async with app_state.pool.acquire() as conn:
-                await conn.fetchval("SELECT 1")
-            ping_ms = (time.perf_counter() - start) * 1000
-            db_status = "Connected"
-            pool_size = app_state.pool.get_size()
-            idle_size = app_state.pool.get_idle_size()
-        except Exception as exc:
-            logger.exception("DB viewer health check failed")
-            db_status = f"Error: {str(exc)}"
-            
-    return render(request, "health.html", {
-        "db_status": db_status,
-        "ping_ms": ping_ms,
-        "pool_size": pool_size,
-        "idle_size": idle_size
-    })
-
-@app.get("/analytics", response_class=HTMLResponse)
-async def analytics(request: Request):
-    if not app_state.pool:
-        return HTMLResponse("Database pool not initialized", status_code=500)
-    data = await queries.get_analytics_data(app_state.pool)
-    return render(request, "analytics.html", {"data": data})
 
 
 def run():

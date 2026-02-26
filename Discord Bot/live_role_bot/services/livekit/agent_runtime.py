@@ -49,6 +49,7 @@ from ...prompts.dialogue import (
 )
 from ...prompts.voice import build_native_audio_system_instruction
 from ...services.gemini_client import GeminiClient
+from ...services.ollama_extractor_backend import OllamaExtractorBackend
 from .bridge import DiscordLiveKitBridge, LiveKitBridgeConfig
 from .config import LiveKitAgentSettings
 from .observability import HealthHeartbeat, LiveKitRuntimeHealth
@@ -71,15 +72,43 @@ def configure_logging() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        force=True,
     )
     root_logger = logging.getLogger()
     has_noise_filter = any(isinstance(f, _DropNoisyRootMessages) for f in getattr(root_logger, "filters", []))
     if not has_noise_filter:
         root_logger.addFilter(_DropNoisyRootMessages())
-    logging.getLogger("livekit").setLevel(logging.INFO)
+    logging.getLogger("livekit").setLevel(logging.WARNING)
+    logging.getLogger("livekit.agents").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+
+
+def _patch_livekit_cli_logging() -> None:
+    """Prevent duplicate root handlers from livekit.agents CLI logging setup."""
+    try:
+        from livekit.agents.cli import log as cli_log  # type: ignore
+    except Exception:
+        return
+
+    if bool(getattr(cli_log, "_lrb_logging_patch_installed", False)):
+        return
+
+    original_setup = getattr(cli_log, "setup_logging", None)
+    if not callable(original_setup):
+        return
+
+    def _wrapped_setup_logging(log_level: str, devmode: bool, console: bool) -> None:
+        original_setup(log_level, devmode, console)
+        # Re-apply our single-handler formatting after LiveKit CLI attaches its own root handler.
+        configure_logging()
+        with contextlib.suppress(Exception):
+            level_name = str(log_level or "INFO").strip().upper()
+            logging.getLogger().setLevel(getattr(logging, level_name, logging.INFO))
+
+    setattr(cli_log, "setup_logging", _wrapped_setup_logging)
+    setattr(cli_log, "_lrb_logging_patch_installed", True)
 
 
 @dataclass(slots=True)
@@ -102,7 +131,7 @@ class _RuntimeDeps:
     silero: Any | None
     health: "LiveKitRuntimeHealth"
     backfill_extractor: MemoryExtractor | None
-    backfill_llm: GeminiClient | None
+    backfill_llm: Any | None
 
 
 @dataclass(slots=True)
@@ -361,6 +390,7 @@ def _select_voice_memory_facts(base_settings: Settings, facts: list[dict[str, An
         return []
     def _priority(fact: dict[str, Any]) -> tuple[int, float, float]:
         try:
+            fact_key = str(fact.get("fact_key") or "").strip().casefold()
             fact_type = str(fact.get("fact_type") or "")
             status = str(fact.get("status") or "")
             confidence = float(fact.get("confidence") or 0.0)
@@ -368,12 +398,17 @@ def _select_voice_memory_facts(base_settings: Settings, facts: list[dict[str, An
         except Exception:
             return (0, 0.0, 0.0)
         tier = 0
+        # Prioritize direct recall identity fields for voice ("what is my name/age?")
+        if fact_key in {"identity:name", "identity:age"}:
+            tier = 5
+        elif fact_key.startswith("identity:") and "name" in fact_key:
+            tier = 4
         if fact_type == "identity":
-            tier = 3
+            tier = max(tier, 3)
         elif fact_type == "preference":
-            tier = 2
+            tier = max(tier, 2)
         elif status == "confirmed":
-            tier = 1
+            tier = max(tier, 1)
         return (tier, confidence, importance)
 
     keep: list[dict[str, Any]] = []
@@ -904,7 +939,10 @@ async def _build_voice_memory_overlay_block(
         return block
 
     try:
-        lines = ["PERSISTED MEMORY (voice retrieval, lower priority than RP CANON):"]
+        lines = [
+            "PERSISTED MEMORY (voice retrieval, lower priority than RP CANON):",
+            "- If the user asks about their name/age/preferences, answer from PERSISTED USER MEMORY first when available.",
+        ]
         persona_subject_id = str(getattr(base_settings, "persona_id", "") or "persona").strip() or "persona"
         persona_subject_user_id = _persona_memory_subject_user_id(base_settings)
         persona_bio_row = await _get_voice_persona_biography_summary(memory_store, persona_id=persona_subject_id)
@@ -914,13 +952,15 @@ async def _build_voice_memory_overlay_block(
             persona_subject_user_id=persona_subject_user_id,
             limit=8,
         )
-        persona_facts = _select_voice_memory_facts(base_settings, persona_facts_rows)[:4]
+        persona_facts = _select_voice_memory_facts(base_settings, persona_facts_rows)[:3]
+        persona_section_lines: list[str] = []
         if persona_bio_text or persona_facts:
-            lines.append("PERSISTED PERSONA MEMORY:")
+            persona_section_lines.append("PERSISTED PERSONA MEMORY:")
             if persona_bio_text:
-                lines.append(build_persona_biography_summary_line(_trim_runtime_text(persona_bio_text, 220)))
+                # Keep persona section compact so user recall facts survive truncation.
+                persona_section_lines.append(build_persona_biography_summary_line(_trim_runtime_text(persona_bio_text, 120)))
             if persona_facts:
-                lines.append(build_persona_relevant_facts_section(persona_facts))
+                persona_section_lines.append(build_persona_relevant_facts_section(persona_facts[:2]))
 
         lines.append("PERSISTED USER MEMORY:")
         get_recent_dialogue_messages = getattr(memory_store, "get_recent_dialogue_messages", None)
@@ -961,19 +1001,27 @@ async def _build_voice_memory_overlay_block(
                 if str(item.get("text") or "").strip()
             ]
 
-            # Opportunistic backfill only for the primary focus user to avoid excess extractor calls.
-            if idx == 0:
-                await _maybe_backfill_facts_from_recent_candidates(
-                    memory_store=memory_store,
-                    extractor=extractor,
-                    runtime_ctx=runtime_ctx,
-                    room_name=room_name,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                    candidates=recent_candidates,
-                    cache=cache,
-                    preferred_language=base_settings.preferred_response_language,
-                )
+            # Opportunistic backfill only for the primary focus user and only after
+            # at least one runtime context has already been applied. This keeps the
+            # first memory retrieval fast enough for direct recall questions.
+            if idx == 0 and int(getattr(runtime_ctx, "updates_applied", 0) or 0) > 0:
+                try:
+                    await asyncio.wait_for(
+                        _maybe_backfill_facts_from_recent_candidates(
+                            memory_store=memory_store,
+                            extractor=extractor,
+                            runtime_ctx=runtime_ctx,
+                            room_name=room_name,
+                            guild_id=guild_id,
+                            user_id=user_id,
+                            candidates=recent_candidates,
+                            cache=cache,
+                            preferred_language=base_settings.preferred_response_language,
+                        ),
+                        timeout=0.35,
+                    )
+                except asyncio.TimeoutError:
+                    logger.debug("[livekit.mem] backfill skipped (timeout) room=%s user=%s", room_name, user_id)
 
             summary_text = str((summary_row or {}).get("summary_text") or "").strip()
             user_bio_text = str((user_bio_row or {}).get("summary_text") or "").strip()
@@ -983,19 +1031,25 @@ async def _build_voice_memory_overlay_block(
             lines.append(
                 f"- user[{user_sections_added}]: {(_trim_runtime_text(label, 32) or '?')} ({_trim_runtime_text(user_id, 24)})"
             )
-            if user_bio_text:
-                lines.append(build_user_biography_summary_line(_trim_runtime_text(user_bio_text, 220)))
-            if summary_text:
-                lines.append(build_user_dialogue_summary_line(_trim_runtime_text(summary_text, 180)))
             if facts:
                 # Keep per-user facts concise so multiple people fit in one runtime block.
                 lines.append(build_relevant_facts_section(facts[:3]))
+            # Facts are higher priority than summaries for direct recall questions ("how old am I?", "what's my name?").
+            if user_bio_text:
+                lines.append(build_user_biography_summary_line(_trim_runtime_text(user_bio_text, 180)))
+            if summary_text:
+                lines.append(build_user_dialogue_summary_line(_trim_runtime_text(summary_text, 140)))
             if recent_user_lines:
                 lines.append("Recent user statements (fallback from messages):")
                 for line in recent_user_lines[: (2 if idx == 0 else 1)]:
                     lines.append(f"- {_trim_runtime_text(line, 120)}")
 
         block = "\n".join(line for line in lines if line).strip()
+        # Persona memory is useful, but lower priority than current users' recall facts in voice mode.
+        if persona_section_lines:
+            persona_block = "\n".join(line for line in persona_section_lines if line).strip()
+            if persona_block:
+                block = ("\n".join([part for part in (block, persona_block) if part])).strip()
         if user_sections_added <= 0 and not (persona_bio_text or persona_facts):
             block = ""
         if len(block) > max_chars:
@@ -1010,6 +1064,14 @@ async def _build_voice_memory_overlay_block(
             if block_hash != runtime_ctx.last_memory_hash:
                 runtime_ctx.memory_updates_applied += 1
                 runtime_ctx.last_memory_hash = block_hash
+                logger.debug(
+                    "[livekit.mem] overlay built room=%s focus_user=%s chars=%s has_name=%s has_age=%s",
+                    room_name,
+                    runtime_ctx.last_memory_focus_user_id or "-",
+                    len(block),
+                    "identity:name" in block,
+                    "identity:age" in block,
+                )
             else:
                 runtime_ctx.memory_updates_ignored += 1
             logger.debug(
@@ -1048,19 +1110,30 @@ def _bridge_snapshot_assistant_audio_busy(
         return False
     payload = packet.get("payload", {}) if isinstance(packet.get("payload"), dict) else {}
     bridge_obj = payload.get("bridge_runtime", {}) if isinstance(payload.get("bridge_runtime"), dict) else {}
-    if bool(bridge_obj.get("assistant_audio_active")):
-        return True
     try:
         last_unix = float(bridge_obj.get("assistant_audio_last_unix") or 0.0)
     except Exception:
         last_unix = 0.0
+    assistant_audio_active = bool(bridge_obj.get("assistant_audio_active"))
+    if assistant_audio_active:
+        # In bridge snapshots this flag can remain true while the remote agent audio track
+        # is merely subscribed (not actively speaking). Gate on recent audio activity instead.
+        if last_unix > 0 and (time.time() - last_unix) < max(0.0, float(idle_grace_sec)):
+            return True
+        if last_unix <= 0:
+            # No timestamp available: keep the original conservative behavior.
+            return True
     if last_unix <= 0:
         return False
     return (time.time() - last_unix) < max(0.0, float(idle_grace_sec))
 
 
 def _packet_topic(packet: object) -> str:
-    return str(getattr(packet, "topic", "") or "").strip()
+    topic = getattr(packet, "topic", "")
+    if isinstance(topic, (bytes, bytearray, memoryview)):
+        with contextlib.suppress(Exception):
+            return bytes(topic).decode("utf-8", errors="ignore").strip()
+    return str(topic or "").strip()
 
 
 async def _publish_context_apply_ack(
@@ -1178,28 +1251,37 @@ def _load_runtime_deps() -> _RuntimeDeps:
 
     google, silero = _import_livekit_plugins(lk_settings.use_silero_vad)
     health = LiveKitRuntimeHealth(worker_name=lk_settings.worker_name, agent_name=lk_settings.agent_name)
-    backfill_llm: GeminiClient | None = None
+    backfill_llm: Any | None = None
     backfill_extractor: MemoryExtractor | None = None
     try:
-        if base_settings.memory_enabled and base_settings.gemini_api_key:
-            backfill_llm = GeminiClient(
-                api_key=base_settings.gemini_api_key,
-                model=base_settings.gemini_model,
-                timeout_seconds=max(20, int(base_settings.gemini_timeout_seconds)),
-                temperature=0.1,
-                max_output_tokens=800,
-                base_url=base_settings.gemini_base_url,
-            )
-            backfill_extractor = MemoryExtractor(
-                enabled=True,
-                llm=backfill_llm,
-                candidate_limit=max(1, int(base_settings.memory_candidate_fact_limit or 6)),
-            )
-            with contextlib.suppress(Exception):
-                awaitable_start = getattr(backfill_llm, "start", None)
-                if callable(awaitable_start):
-                    # `_load_runtime_deps` is sync; defer explicit startup to first use if needed.
-                    pass
+        if base_settings.memory_enabled:
+            if str(getattr(base_settings, "memory_extractor_backend", "gemini") or "gemini").strip().lower() == "ollama":
+                backfill_llm = OllamaExtractorBackend(
+                    base_url=str(getattr(base_settings, "memory_ollama_base_url", "") or "http://127.0.0.1:11434"),
+                    model=str(getattr(base_settings, "memory_ollama_model", "") or ""),
+                    timeout_seconds=max(5, int(getattr(base_settings, "memory_ollama_timeout_seconds", 45) or 45)),
+                    temperature=float(getattr(base_settings, "memory_ollama_temperature", 0.1) or 0.1),
+                )
+            elif base_settings.gemini_api_key:
+                backfill_llm = GeminiClient(
+                    api_key=base_settings.gemini_api_key,
+                    model=base_settings.gemini_model,
+                    timeout_seconds=max(20, int(base_settings.gemini_timeout_seconds)),
+                    temperature=0.1,
+                    max_output_tokens=800,
+                    base_url=base_settings.gemini_base_url,
+                )
+            if backfill_llm is not None:
+                backfill_extractor = MemoryExtractor(
+                    enabled=True,
+                    llm=backfill_llm,
+                    candidate_limit=max(1, int(base_settings.memory_candidate_fact_limit or 6)),
+                )
+                with contextlib.suppress(Exception):
+                    awaitable_start = getattr(backfill_llm, "start", None)
+                    if callable(awaitable_start):
+                        # `_load_runtime_deps` is sync; defer explicit startup to first use if needed.
+                        pass
     except Exception:
         backfill_llm = None
         backfill_extractor = None
@@ -1374,9 +1456,10 @@ async def _handle_session(ctx: Any) -> None:
                 packet_participant_identity = str(getattr(packet_participant, "identity", "") or "")
                 raw = getattr(packet, "data", b"")
                 raw_bytes_len = 0
-                if isinstance(raw, bytes):
-                    raw_bytes_len = len(raw)
-                    payload_text = raw.decode("utf-8", errors="ignore")
+                if isinstance(raw, (bytes, bytearray, memoryview)):
+                    raw_bytes = bytes(raw)
+                    raw_bytes_len = len(raw_bytes)
+                    payload_text = raw_bytes.decode("utf-8", errors="ignore")
                 else:
                     payload_text = str(raw or "")
                     raw_bytes_len = len(payload_text.encode("utf-8", errors="ignore"))
@@ -1422,12 +1505,21 @@ async def _handle_session(ctx: Any) -> None:
                 runtime_ctx.latest_packet = payload_obj
                 runtime_ctx.last_received_at = time.monotonic()
                 runtime_ctx.updates_received += 1
+                if runtime_ctx.updates_received <= 3 or (runtime_ctx.updates_received % 20) == 0:
+                    logger.debug(
+                        "[livekit.ctx] received bridge context room=%s seq=%s reason=%s bytes=%s received=%s",
+                        room_name,
+                        runtime_ctx.last_seq,
+                        runtime_ctx.last_received_reason or "-",
+                        raw_bytes_len,
+                        runtime_ctx.updates_received,
+                    )
                 runtime_ctx_event.set()
                 health.mark_activity()
             except Exception as exc:
                 runtime_ctx.updates_errors += 1
                 runtime_ctx.last_apply_error = f"packet_parse:{type(exc).__name__}"
-                logger.debug("[livekit.ctx] failed to parse bridge context packet room=%s: %s", room_name, exc)
+                logger.warning("[livekit.ctx] failed to parse bridge context packet room=%s: %s", room_name, exc)
 
         if lk_settings.agent_runtime_context_injection_enabled:
             with contextlib.suppress(Exception):
@@ -1472,6 +1564,14 @@ async def _handle_session(ctx: Any) -> None:
                     cache=memory_cache,
                     max_chars=max(220, min(720, lk_settings.agent_runtime_context_max_chars + 180)),
                 )
+                if runtime_ctx.updates_received > 0 and runtime_ctx.updates_applied <= 0:
+                    logger.debug(
+                        "[livekit.ctx] building runtime instructions room=%s runtime_chars=%s memory_chars=%s focus_user=%s",
+                        room_name,
+                        len(runtime_block or ""),
+                        len(memory_block or ""),
+                        runtime_ctx.last_memory_focus_user_id or "-",
+                    )
                 merged_instructions = _compose_livekit_instructions_with_runtime_context(
                     deps.instructions,
                     "\n\n".join(part for part in (runtime_block, memory_block) if part).strip(),
@@ -1679,4 +1779,5 @@ def main() -> None:
 
     server.rtc_session(agent_name=lk_settings.agent_name)(_handle_session)  # type: ignore[misc]
 
+    _patch_livekit_cli_logging()
     agents.cli.run_app(server)

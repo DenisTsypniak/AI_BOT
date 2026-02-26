@@ -1,0 +1,289 @@
+{% extends "base.html" %}
+
+{% block title %}Пам'ять Персони - Live Role Bot{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1 class="page-title">🧠 Пам'ять Персони</h1>
+    <p class="page-description">
+        Візуалізація self-facts бота, біографії персони, джерел доказів та останніх рішень екстрактора пам'яті.
+    </p>
+    <div style="margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap;">
+        <a href="/persona/card" class="btn primary">Картка Персони</a>
+        <a href="/persona" class="btn">← Назад до Персони</a>
+        <a href="/memory/provenance" class="btn">Походження пам'яті</a>
+        <a href="/memory/extractor" class="btn">Діагностика екстрактора</a>
+        <a href="/persona/memory?fact_limit={{ fact_limit }}&fact_offset={{ fact_offset }}&run_limit={{ run_limit }}&candidate_limit={{ candidate_limit }}" class="btn">Оновити</a>
+    </div>
+</div>
+
+<div class="stats-grid" style="margin-bottom: 24px;">
+    <div class="stat-card">
+        <div class="stat-title">Фактів Персони</div>
+        <div class="stat-value">{{ summary.total_facts or 0 }}</div>
+        <div class="stat-subtitle">subjects: {{ summary.persona_subjects or 0 }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-title">Підтверджені / Кандидати</div>
+        <div class="stat-value">{{ summary.confirmed_facts or 0 }} / {{ summary.candidate_facts or 0 }}</div>
+        <div class="stat-subtitle">pinned: {{ summary.pinned_facts or 0 }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-title">Сер. Впевненість</div>
+        <div class="stat-value">{{ "%.2f"|format(summary.avg_confidence or 0) }}</div>
+        <div class="stat-subtitle">last: {{ summary.last_fact_update|kyiv_time(default='н/д') }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-title">Extractor (Persona)</div>
+        <div class="stat-value">{{ recent_runs|length }}</div>
+        <div class="stat-subtitle">кандидатів: {{ recent_candidates|length }}, reject: {{ rejected_candidates|length }}</div>
+    </div>
+</div>
+
+<h2 style="margin-top: 0;">📘 Біографія Персони</h2>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Subject ID</th>
+                <th>Біографічне зведення</th>
+                <th>Фактів</th>
+                <th>Останній Guild</th>
+                <th>Оновлено</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in biographies %}
+            <tr>
+                <td style="font-family: monospace;">
+                    <span class="badge blue">{{ row.subject_kind }}</span>
+                    <div style="margin-top: 6px;">{{ row.subject_id }}</div>
+                </td>
+                <td class="text-wrap">{{ row.summary_text }}</td>
+                <td>{{ row.source_fact_count or 0 }}</td>
+                <td style="font-family: monospace;">{{ row.last_source_guild_id or '—' }}</td>
+                <td style="font-size: 0.85rem; color: var(--text-muted);">{{ row.updated_at|kyiv_time(default='н/д') }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" style="text-align: center; padding: 24px; color: var(--text-muted);">
+                    Біографія персони ще не згенерована.
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2 style="margin-top: 32px;">🍽️ Self-Facts Персони (що бот “пам'ятає” про себе)</h2>
+<div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
+    <a href="/persona/memory?fact_limit={{ fact_limit }}&fact_offset={{ fact_offset + fact_limit }}&run_limit={{ run_limit }}&candidate_limit={{ candidate_limit }}" class="btn {% if not has_next_facts_page %}disabled{% endif %}">Наступна сторінка фактів</a>
+    {% if fact_offset > 0 %}
+    <a href="/persona/memory?fact_limit={{ fact_limit }}&fact_offset={{ prev_fact_offset }}&run_limit={{ run_limit }}&candidate_limit={{ candidate_limit }}" class="btn">Попередня сторінка</a>
+    {% endif %}
+    <span class="badge">limit={{ fact_limit }}</span>
+    <span class="badge">offset={{ fact_offset }}</span>
+</div>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Persona ID</th>
+                <th>Факт</th>
+                <th>Значення</th>
+                <th>Meta</th>
+                <th>Стан</th>
+                <th>Conf / Imp</th>
+                <th>Джерела (guild)</th>
+                <th>Оновлено</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for fact in facts %}
+            <tr>
+                <td style="font-family: monospace;">
+                    {{ fact.persona_id or fact.user_id }}
+                    <div style="font-size:0.75rem; color:var(--text-muted);">{{ fact.user_id }}</div>
+                </td>
+                <td><span class="badge blue">{{ fact.fact_key }}</span></td>
+                <td class="text-wrap">
+                    {{ fact.fact_value }}
+                    {% if fact.pinned %}
+                    <span title="Закріплений факт" style="cursor: help;">📌</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <div class="badge blue" style="margin:2px 4px 2px 0;">{{ fact.about_target or 'assistant_self' }}</div>
+                    <div class="badge" style="margin:2px 4px 2px 0;">{{ fact.directness or 'explicit' }}</div>
+                    {% if fact.evidence_quote %}
+                    <div class="text-wrap" style="margin-top:4px; max-width:260px; font-size:0.78rem; color:var(--text-muted);">
+                        "{{ fact.evidence_quote }}"
+                    </div>
+                    {% endif %}
+                </td>
+                <td>
+                    <span class="badge {% if fact.status == 'confirmed' %}green{% elif fact.status == 'candidate' %}yellow{% else %}blue{% endif %}">
+                        {{ fact.status or 'unknown' }}
+                    </span>
+                </td>
+                <td>
+                    <div>{{ "%.2f"|format(fact.confidence or 0) }}</div>
+                    <div style="font-size:0.78rem; color:var(--text-muted);">imp={{ "%.2f"|format(fact.importance or 0) }}</div>
+                </td>
+                <td>
+                    <div style="font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">
+                        evidence={{ fact.provenance_evidence_count or fact.evidence_count or 0 }}
+                    </div>
+                    {% for item in fact.provenance_guild_breakdown or [] %}
+                    <div class="badge" style="margin: 2px 4px 2px 0;">{{ item.guild_id or '(none)' }}: {{ item.count }}</div>
+                    {% else %}
+                    <span class="text-muted" style="font-size:0.8rem;">нема evidence rows</span>
+                    {% endfor %}
+                    {% if fact.provenance_directness_breakdown %}
+                    <div style="margin-top:6px;">
+                        {% for item in fact.provenance_directness_breakdown or [] %}
+                        <span class="badge blue" style="margin: 2px 4px 2px 0;">{{ item.directness or 'explicit' }}: {{ item.count }}</span>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                </td>
+                <td style="font-size:0.85rem; color:var(--text-muted);">{{ fact.updated_at|kyiv_time(default='н/д') }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="8" style="text-align:center; padding:24px; color:var(--text-muted);">
+                    Self-facts персони ще не збережені. Поспілкуйся з ботом і запитай щось про неї, щоб вона сказала факт про себе.
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2 style="margin-top: 32px;">🧪 Останні запуски extractor-а для персони</h2>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Час</th>
+                <th>Guild / Channel</th>
+                <th>Backend</th>
+                <th>Mode</th>
+                <th>Кандидати</th>
+                <th>Прийнято</th>
+                <th>Збережено</th>
+                <th>JSON</th>
+                <th>Помилка</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in recent_runs %}
+            <tr>
+                <td style="font-size:0.85rem; color:var(--text-muted);">{{ row.created_at|kyiv_time(default='н/д') }}</td>
+                <td>
+                    <div style="font-family: monospace; font-size:0.8rem;">g={{ row.guild_id or '' }}</div>
+                    <div style="font-family: monospace; font-size:0.8rem; color:var(--text-muted);">c={{ row.channel_id or '' }}</div>
+                </td>
+                <td>
+                    <span class="badge">{{ row.backend_name or '' }}</span>
+                    <div style="font-size:0.78rem; color:var(--text-muted); font-family: monospace;">{{ row.model_name or '' }}</div>
+                </td>
+                <td>
+                    {% if row.dry_run %}
+                    <span class="badge yellow">dry-run</span>
+                    {% else %}
+                    <span class="badge green">apply</span>
+                    {% endif %}
+                </td>
+                <td>{{ row.candidate_count or 0 }}</td>
+                <td>{{ row.accepted_count or 0 }}</td>
+                <td>{{ row.saved_count or 0 }}</td>
+                <td>
+                    {% if row.llm_attempted and row.json_valid %}
+                    <span class="badge green">json=ok</span>
+                    {% elif row.llm_attempted %}
+                    <span class="badge yellow">json=bad</span>
+                    {% else %}
+                    <span class="badge">no-llm</span>
+                    {% endif %}
+                </td>
+                <td class="text-wrap" style="font-size:0.8rem; color:var(--text-muted); max-width:260px;">{{ row.error_text or '' }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="9" style="text-align:center; padding:24px; color:var(--text-muted);">
+                    Ще немає запусків extractor-а для пам'яті персони.
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2 style="margin-top: 32px;">🧾 Останні кандидати фактів персони</h2>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Час</th>
+                <th>Факт</th>
+                <th>Значення</th>
+                <th>Meta</th>
+                <th>Модерація</th>
+                <th>Запис</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in recent_candidates %}
+            <tr>
+                <td style="font-size:0.85rem; color:var(--text-muted);">{{ row.created_at|kyiv_time(default='н/д') }}</td>
+                <td>
+                    <span class="badge">{{ row.fact_key }}</span>
+                    <div style="margin-top:4px; font-size:0.78rem; color:var(--text-muted);">{{ row.fact_type or '' }}</div>
+                </td>
+                <td class="text-wrap">
+                    {{ row.fact_value }}
+                    {% if row.evidence_quote %}
+                    <div style="margin-top:4px; font-size:0.78rem; color:var(--text-muted); max-width:260px;">
+                        "{{ row.evidence_quote }}"
+                    </div>
+                    {% endif %}
+                </td>
+                <td>
+                    <div class="badge blue" style="margin:2px 4px 2px 0;">{{ row.about_target or 'assistant_self' }}</div>
+                    <div class="badge" style="margin:2px 4px 2px 0;">{{ row.directness or 'explicit' }}</div>
+                    <div style="font-size:0.78rem; color:var(--text-muted); margin-top:4px;">
+                        conf={{ "%.2f"|format(row.confidence or 0) }}, imp={{ "%.2f"|format(row.importance or 0) }}
+                    </div>
+                </td>
+                <td>
+                    {% set action = row.moderation_action or 'accept' %}
+                    <span class="badge {% if action == 'accept' %}green{% else %}yellow{% endif %}">{{ action }}</span>
+                    <div class="text-wrap" style="font-size:0.78rem; color:var(--text-muted); margin-top:4px; max-width:220px;">
+                        {{ row.moderation_reason or '' }}
+                    </div>
+                </td>
+                <td>
+                    {% if row.saved_to_memory %}
+                    <span class="badge green">збережено</span>
+                    {% elif row.selected_for_apply %}
+                    <span class="badge blue">відібрано</span>
+                    {% else %}
+                    <span class="badge">ні</span>
+                    {% endif %}
+                    {% if row.dry_run %}
+                    <div style="margin-top:4px;"><span class="badge yellow">dry-run</span></div>
+                    {% endif %}
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="6" style="text-align:center; padding:24px; color:var(--text-muted);">
+                    Кандидатів фактів персони поки немає.
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

@@ -787,6 +787,16 @@ class LiveKitDiscordBridgeManager:
             state.last_context_publish_error = ""
             state.last_context_payload_bytes = len(packet_text.encode("utf-8", errors="ignore"))
             state.context_publish_success += 1
+            if state.context_publish_success <= 3 or (state.context_publish_success % 20) == 0:
+                logger.debug(
+                    "[bridge.live] context published guild=%s room=%s seq=%s reason=%s bytes=%s sent=%s",
+                    state.guild_id,
+                    state.room_name,
+                    state.context_sync_seq,
+                    reason,
+                    state.last_context_payload_bytes,
+                    state.context_publish_success,
+                )
             if state.health is not None:
                 state.health.mark_activity()
         except Exception as exc:

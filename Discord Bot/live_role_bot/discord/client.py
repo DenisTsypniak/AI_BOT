@@ -5,6 +5,7 @@ import contextlib
 import logging
 import time
 from collections import defaultdict
+from typing import Any
 
 import discord
 
@@ -12,7 +13,6 @@ from ..config import Settings
 from ..memory.extractor import MemoryExtractor
 from ..memory.store import MemoryStore
 from ..persona import PersonaGrowthEngine
-from ..services.gemini_client import GeminiClient
 from ..services.livekit.bridge import LiveKitDiscordBridgeManager
 from ..services.livekit.config import LiveKitAgentSettings
 from ..services.native_audio import GeminiNativeAudioManager
@@ -47,7 +47,7 @@ class LiveRoleDiscordBot(
         self,
         settings: Settings,
         memory: MemoryStore,
-        llm: GeminiClient,
+        llm: Any,
         memory_extractor: MemoryExtractor,
         local_stt: LocalSTT,
     ) -> None:

@@ -1512,7 +1512,7 @@ class PostgresMemoryStore:
         summary_text: str,
         source_fact_count: int = 0,
         source_summary_count: int = 0,
-        source_updated_at: str | None = None,
+        source_updated_at: str | datetime | None = None,
         last_source_guild_id: str | None = None,
     ) -> None:
         kind = str(subject_kind or "").strip().lower()
@@ -1520,6 +1520,17 @@ class PostgresMemoryStore:
         summary = summary_text.strip()
         if not (kind and subject and summary):
             return
+        source_updated_dt: datetime | None = None
+        if isinstance(source_updated_at, datetime):
+            source_updated_dt = source_updated_at
+        elif source_updated_at:
+            raw = str(source_updated_at).strip()
+            if raw:
+                try:
+                    # Support ISO strings with trailing Z from logs/backends.
+                    source_updated_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                except Exception:
+                    source_updated_dt = None
         pool = await self._ensure_pool()
         async with pool.acquire() as conn:
             await conn.execute(
@@ -1542,7 +1553,7 @@ class PostgresMemoryStore:
                 summary,
                 max(0, int(source_fact_count)),
                 max(0, int(source_summary_count)),
-                str(source_updated_at).strip() if source_updated_at else None,
+                source_updated_dt,
                 str(last_source_guild_id).strip() if last_source_guild_id else None,
             )
 

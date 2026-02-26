@@ -42,10 +42,34 @@ class OllamaExtractorBackend:
     @staticmethod
     def _strip_json_fences(text: str) -> str:
         cleaned = (text or "").strip()
+        cleaned = re.sub(r"<think>.*?</think>\s*", "", cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
         if cleaned.startswith("```"):
             cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE).strip()
             cleaned = re.sub(r"```$", "", cleaned).strip()
+        if not cleaned.startswith("{"):
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start >= 0 and end > start:
+                cleaned = cleaned[start : end + 1].strip()
         return cleaned
+
+    @staticmethod
+    def _looks_like_json_schema(parsed: dict[str, Any]) -> bool:
+        # Ollama `format` expects a JSON Schema object, not an example JSON payload.
+        schema_markers = {
+            "type",
+            "properties",
+            "required",
+            "items",
+            "oneOf",
+            "anyOf",
+            "allOf",
+            "$schema",
+            "$defs",
+            "definitions",
+            "enum",
+        }
+        return any(key in parsed for key in schema_markers)
 
     @staticmethod
     def _schema_format(schema_hint: str) -> dict[str, Any] | str:
@@ -53,7 +77,7 @@ class OllamaExtractorBackend:
             parsed = json.loads(str(schema_hint or "").strip())
         except Exception:
             return "json"
-        if isinstance(parsed, dict):
+        if isinstance(parsed, dict) and OllamaExtractorBackend._looks_like_json_schema(parsed):
             return parsed
         return "json"
 
@@ -75,6 +99,19 @@ class OllamaExtractorBackend:
                     retriable = response.status in {408, 409, 429, 500, 502, 503, 504}
                     if not retriable:
                         raise RuntimeError(f"Ollama error {response.status}: {text}")
+                    # Some prompt schema hints are "example JSON objects", not strict JSON Schema.
+                    # If Ollama rejects `format`, transparently retry with plain JSON mode.
+                    if (
+                        response.status == 500
+                        and "invalid json schema in format" in text.lower()
+                        and payload.get("format") != "json"
+                    ):
+                        payload = dict(payload)
+                        payload["format"] = "json"
+                        last_error = RuntimeError(
+                            "Ollama rejected structured `format` schema; retrying with format='json'"
+                        )
+                        continue
                     last_error = RuntimeError(f"Ollama retriable error {response.status}: {text}")
             except asyncio.CancelledError:
                 raise
@@ -129,6 +166,7 @@ class OllamaExtractorBackend:
             "model": self.model,
             "messages": mapped_messages,
             "stream": False,
+            "think": False,
             "format": self._schema_format(schema_hint),
             "options": options,
         }
@@ -142,4 +180,3 @@ class OllamaExtractorBackend:
         if not isinstance(parsed, dict):
             return None
         return parsed
-

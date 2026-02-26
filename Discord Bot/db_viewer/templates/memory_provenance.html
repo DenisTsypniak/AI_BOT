@@ -1,14 +1,14 @@
 {% extends "base.html" %}
 
-{% block title %}Memory Provenance - Live Role Bot{% endblock %}
+{% block title %}Походження Пам'яті (Provenance) - Live Role Bot{% endblock %}
 
 {% block content %}
 <div class="page-header">
-    <h1 class="page-title">Memory Provenance</h1>
+    <h1 class="page-title">Походження Пам'яті (Provenance)</h1>
     <p class="page-description">Local vs global facts, evidence by guild, persona self-memory, and biography summaries.</p>
     <div style="margin-top: 12px; display: flex; gap: 10px;">
         <a href="/memory" class="btn">Back To Memory</a>
-        <a href="/memory/extractor" class="btn">Extractor Diagnostics</a>
+        <a href="/memory/extractor" class="btn">Діагностика Екстрактора</a>
         <a href="/memory/provenance?limit={{ limit }}&offset={{ offset + limit }}" class="btn">Next Page</a>
         {% if offset > 0 %}
         <a href="/memory/provenance?limit={{ limit }}&offset={{ prev_offset }}" class="btn">Prev Page</a>

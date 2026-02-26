@@ -1,0 +1,607 @@
+﻿{% extends "base.html" %}
+
+{% macro fact_status_badge(status) -%}
+    {% set s = (status or 'unknown') %}
+    {% if s == 'confirmed' %}
+        <span class="badge green">підтверджено</span>
+    {% elif s == 'candidate' %}
+        <span class="badge yellow">кандидат</span>
+    {% else %}
+        <span class="badge blue">{{ s }}</span>
+    {% endif %}
+{%- endmacro %}
+
+{% macro trait_status_badge(status) -%}
+    {% set s = (status or 'unknown') %}
+    {% if s == 'active' %}
+        <span class="badge green">активна</span>
+    {% elif s == 'emerging' %}
+        <span class="badge yellow">формується</span>
+    {% else %}
+        <span class="badge blue">{{ s }}</span>
+    {% endif %}
+{%- endmacro %}
+
+{% block title %}Особистість Лізи - Live Role Bot{% endblock %}
+
+{% block content %}
+<style>
+    .persona-card-page {
+        display: grid;
+        gap: 18px;
+    }
+
+    .persona-hero {
+        background:
+            radial-gradient(1200px 220px at 10% -10%, rgba(40, 111, 255, 0.25), transparent 60%),
+            radial-gradient(900px 220px at 90% 0%, rgba(0, 201, 167, 0.14), transparent 58%),
+            var(--surface-color);
+        border: 1px solid var(--border-color);
+        border-radius: 14px;
+        padding: 18px;
+        display: grid;
+        grid-template-columns: 1.3fr 0.7fr;
+        gap: 16px;
+    }
+
+    .persona-hero h1 {
+        margin: 0 0 8px 0;
+        font-size: 1.8rem;
+        line-height: 1.15;
+    }
+
+    .persona-hero p {
+        margin: 0;
+        color: var(--text-muted);
+        line-height: 1.45;
+    }
+
+    .persona-actions {
+        margin-top: 14px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+
+    .persona-side-panel {
+        display: grid;
+        align-content: start;
+        gap: 10px;
+    }
+
+    .persona-side-box {
+        background: rgba(255,255,255,0.02);
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
+        padding: 12px;
+    }
+
+    .persona-side-box h3 {
+        margin: 0 0 8px 0;
+        font-size: 0.95rem;
+    }
+
+    .persona-side-box .list {
+        display: grid;
+        gap: 8px;
+    }
+
+    .persona-side-box .list a {
+        text-decoration: none;
+    }
+
+    .persona-mini-kv {
+        display: grid;
+        gap: 8px;
+        font-size: 0.9rem;
+    }
+
+    .persona-mini-kv .row {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+    }
+
+    .persona-mini-kv .k {
+        color: var(--text-muted);
+    }
+
+    .persona-grid-2 {
+        display: grid;
+        grid-template-columns: 1.1fr 0.9fr;
+        gap: 18px;
+        align-items: start;
+    }
+
+    .persona-grid-2.equal {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .section-card {
+        background: var(--surface-color);
+        border: 1px solid var(--border-color);
+        border-radius: 14px;
+        padding: 14px;
+    }
+
+    .section-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 10px;
+        flex-wrap: wrap;
+    }
+
+    .section-title {
+        margin: 0;
+        font-size: 1.05rem;
+    }
+
+    .subtle {
+        color: var(--text-muted);
+        font-size: 0.85rem;
+    }
+
+    .bio-text {
+        font-size: 0.95rem;
+        line-height: 1.55;
+    }
+
+    .chip-row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 10px;
+    }
+
+    .trait-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 12px;
+    }
+
+    .trait-card {
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
+        padding: 12px;
+        background: rgba(255,255,255,0.02);
+    }
+
+    .trait-card h4 {
+        margin: 0;
+        font-size: 0.95rem;
+    }
+
+    .trait-desc {
+        color: var(--text-muted);
+        font-size: 0.84rem;
+        margin-top: 6px;
+        line-height: 1.35;
+    }
+
+    .mono-key {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        color: var(--accent);
+        font-size: 0.78rem;
+    }
+
+    .trait-metrics {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 10px;
+    }
+
+    .trait-metrics .m {
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        padding: 6px 8px;
+        background: rgba(255,255,255,0.015);
+    }
+
+    .trait-metrics .m .label {
+        display: block;
+        color: var(--text-muted);
+        font-size: 0.72rem;
+    }
+
+    .trait-metrics .m .value {
+        display: block;
+        margin-top: 2px;
+        font-size: 0.82rem;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .mini-empty {
+        text-align: center;
+        color: var(--text-muted);
+        padding: 18px;
+        border: 1px dashed var(--border-color);
+        border-radius: 12px;
+    }
+
+    .dense-table table td,
+    .dense-table table th {
+        padding-top: 9px;
+        padding-bottom: 9px;
+        vertical-align: top;
+    }
+
+    .cell-stack {
+        display: grid;
+        gap: 6px;
+    }
+
+    .quote {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        line-height: 1.35;
+        border-left: 2px solid var(--border-color);
+        padding-left: 8px;
+        margin-top: 4px;
+    }
+
+    @media (max-width: 1080px) {
+        .persona-hero,
+        .persona-grid-2,
+        .persona-grid-2.equal {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+
+<div class="persona-card-page">
+    <section class="persona-hero">
+        <div>
+            <h1>🎭 Особистість Лізи</h1>
+            <p>
+                Жива картка персонажа: що Ліза пам'ятає про себе, які риси зараз домінують,
+                що формується, і які події впливають на її характер.
+            </p>
+            <div class="persona-actions">
+                <a href="/persona/memory" class="btn primary">Пам'ять персони</a>
+                <a href="/persona" class="btn">Стан персони</a>
+                <a href="/memory/provenance" class="btn">Походження фактів</a>
+                <a href="/memory/extractor" class="btn">Extractor діагностика</a>
+            </div>
+        </div>
+
+        <div class="persona-side-panel">
+            <div class="persona-side-box">
+                <h3>Швидкий огляд</h3>
+                <div class="persona-mini-kv">
+                    <div class="row"><span class="k">Self-facts</span><strong>{{ summary.total_facts or 0 }}</strong></div>
+                    <div class="row"><span class="k">Підтверджені</span><strong>{{ summary.confirmed_facts or 0 }}</strong></div>
+                    <div class="row"><span class="k">Кандидати</span><strong>{{ summary.candidate_facts or 0 }}</strong></div>
+                    <div class="row"><span class="k">Pinned</span><strong>{{ summary.pinned_facts or 0 }}</strong></div>
+                </div>
+            </div>
+            <div class="persona-side-box">
+                <h3>Стан розвитку</h3>
+                <div class="persona-mini-kv">
+                    <div class="row"><span class="k">Активні риси</span><strong>{{ summary.traits_active or 0 }}</strong></div>
+                    <div class="row"><span class="k">Риси, що формуються</span><strong>{{ summary.traits_emerging or 0 }}</strong></div>
+                    <div class="row"><span class="k">Сер. впевненість</span><strong>{{ "%.2f"|format(summary.avg_confidence or 0) }}</strong></div>
+                    <div class="row"><span class="k">Оновлено</span><strong>{{ summary.last_fact_update|kyiv_time(default='н/д') }}</strong></div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-title">Ключові self-facts</div>
+            <div class="stat-value">{{ highlight_facts|length }}</div>
+            <div class="stat-subtitle">у швидкому перегляді картки</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-title">Риси персони</div>
+            <div class="stat-value">{{ summary.traits_total or 0 }}</div>
+            <div class="stat-subtitle">active: {{ summary.traits_active or 0 }}, emerging: {{ summary.traits_emerging or 0 }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-title">Епізоди</div>
+            <div class="stat-value">{{ episodes|length }}</div>
+            <div class="stat-subtitle">preview останніх подій</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-title">Extractor runs</div>
+            <div class="stat-value">{{ recent_runs|length }}</div>
+            <div class="stat-subtitle">backend / JSON / decisions</div>
+        </div>
+    </div>
+
+    <div class="persona-grid-2">
+        <section class="section-card">
+            <div class="section-header">
+                <h2 class="section-title">📘 Поточна біографія Лізи</h2>
+                {% if persona_biography %}<span class="badge blue">persona summary</span>{% endif %}
+            </div>
+            {% if persona_biography %}
+                <div class="bio-text text-wrap">{{ persona_biography.summary_text }}</div>
+                <div class="chip-row">
+                    <span class="badge blue">джерело фактів: {{ persona_biography.source_fact_count or 0 }}</span>
+                    <span class="badge">guild: {{ persona_biography.last_source_guild_id or '—' }}</span>
+                    <span class="badge">оновлено: {{ persona_biography.updated_at|kyiv_time(default='н/д') }}</span>
+                </div>
+            {% else %}
+                <div class="mini-empty">
+                    Біографія ще не згенерована. Потрібно більше self-facts і фоновий цикл оновлення.
+                </div>
+            {% endif %}
+        </section>
+
+        <section class="section-card">
+            <div class="section-header">
+                <h2 class="section-title">⚡ Швидкі переходи</h2>
+                <span class="subtle">Навігація по persona/debug сторінках</span>
+            </div>
+            <div style="display:grid; gap:10px;">
+                <a class="btn" href="/persona/reflections">🧠 Рефлексії</a>
+                <a class="btn" href="/persona/relationships">🤝 Відносини</a>
+                <a class="btn" href="/persona/evidence">📂 Докази рис</a>
+                <a class="btn" href="/persona/audit">📝 Аудит персони</a>
+                <a class="btn" href="/memory">🧠 Загальна пам'ять</a>
+            </div>
+        </section>
+    </div>
+
+    <section class="section-card">
+        <div class="section-header">
+            <h2 class="section-title">🧬 Домінуючі риси</h2>
+            <span class="subtle">Топ риси за силою прояву та evidence</span>
+        </div>
+        {% if dominant_traits %}
+            <div class="trait-grid">
+                {% for trait in dominant_traits %}
+                    <article class="trait-card">
+                        <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+                            <div>
+                                <h4>{{ trait.label }}</h4>
+                                <div class="mono-key">{{ trait.trait_key }}</div>
+                            </div>
+                            {{ trait_status_badge(trait.status) }}
+                        </div>
+                        <div class="trait-desc text-wrap">{{ trait.description }}</div>
+                        <div class="trait-metrics">
+                            <div class="m">
+                                <span class="label">Current</span>
+                                <span class="value">{{ "%+.2f"|format(trait.current_value or 0) }}</span>
+                            </div>
+                            <div class="m">
+                                <span class="label">Anchor</span>
+                                <span class="value">{{ "%+.2f"|format(trait.anchor_value or 0) }}</span>
+                            </div>
+                            <div class="m">
+                                <span class="label">Drift</span>
+                                <span class="value">{{ "%+.3f"|format(trait.drift_velocity or 0) }}</span>
+                            </div>
+                        </div>
+                        <div class="chip-row" style="margin-top: 8px;">
+                            <span class="badge">evidence: {{ trait.evidence_count or 0 }}</span>
+                        </div>
+                    </article>
+                {% endfor %}
+            </div>
+        {% else %}
+            <div class="mini-empty">Риси персони ще не зчитано.</div>
+        {% endif %}
+    </section>
+
+    {% if emerging_traits %}
+    <section class="section-card">
+        <div class="section-header">
+            <h2 class="section-title">🌱 Риси, що формуються</h2>
+            <span class="subtle">Поведінкові зміни, які ще закріплюються</span>
+        </div>
+        <div class="trait-grid">
+            {% for trait in emerging_traits %}
+                <article class="trait-card" style="border-left: 4px solid var(--warning);">
+                    <div style="display:flex; justify-content:space-between; gap:8px; align-items:flex-start;">
+                        <div>
+                            <h4>{{ trait.label }}</h4>
+                            <div class="mono-key">{{ trait.trait_key }}</div>
+                        </div>
+                        {{ trait_status_badge(trait.status) }}
+                    </div>
+                    <div class="trait-desc text-wrap">{{ trait.description }}</div>
+                    <div class="chip-row">
+                        <span class="badge">Current: {{ "%+.2f"|format(trait.current_value or 0) }}</span>
+                        <span class="badge">Drift: {{ "%+.3f"|format(trait.drift_velocity or 0) }}</span>
+                        <span class="badge">evidence: {{ trait.evidence_count or 0 }}</span>
+                    </div>
+                </article>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+    <section class="section-card dense-table">
+        <div class="section-header">
+            <h2 class="section-title">🍽️ Ключові Self-facts (Ліза про себе)</h2>
+            <span class="subtle">Факти, які формують безперервність особистості між перезапусками</span>
+        </div>
+        <div class="table-container" style="margin: 0; background: transparent; border: 0; border-radius: 0; padding: 0;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Факт</th>
+                        <th>Значення</th>
+                        <th>Meta</th>
+                        <th>Статус</th>
+                        <th>Впевненість</th>
+                        <th>Джерела</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for fact in highlight_facts %}
+                    <tr>
+                        <td><span class="badge blue">{{ fact.fact_key }}</span></td>
+                        <td class="text-wrap">
+                            {{ fact.fact_value }}
+                            {% if fact.pinned %}
+                                <span title="Закріплений факт" style="cursor: help; margin-left: 4px;">📌</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <div class="cell-stack">
+                                <div>
+                                    <span class="badge blue">{{ fact.about_target or 'assistant_self' }}</span>
+                                    <span class="badge">{{ fact.directness or 'explicit' }}</span>
+                                </div>
+                                {% if fact.evidence_quote %}
+                                <div class="quote text-wrap">{{ fact.evidence_quote }}</div>
+                                {% endif %}
+                            </div>
+                        </td>
+                        <td>{{ fact_status_badge(fact.status) }}</td>
+                        <td>{{ "%.2f"|format(fact.confidence or 0) }}</td>
+                        <td>
+                            {% for item in fact.provenance_guild_breakdown or [] %}
+                                <span class="badge" style="margin: 2px 4px 2px 0;">{{ item.guild_id or 'невідомо' }}: {{ item.count }}</span>
+                            {% else %}
+                                <span class="subtle">нема evidence rows</span>
+                            {% endfor %}
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="6" style="text-align:center; padding:24px; color:var(--text-muted);">
+                            Self-facts поки що порожні. Поспілкуйся з ботом, щоб Ліза сказала щось про себе.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <div class="persona-grid-2 equal">
+        <section class="section-card dense-table">
+            <div class="section-header">
+                <h2 class="section-title">🎞️ Епізоди, що формують персонажа</h2>
+                <span class="subtle">Останні значущі події</span>
+            </div>
+            <div class="table-container" style="margin: 0; background: transparent; border: 0; border-radius: 0; padding: 0;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Тип / Назва</th>
+                            <th>Коротко</th>
+                            <th>Важливість</th>
+                            <th>Статус</th>
+                            <th>Оновлено</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for ep in episodes %}
+                        <tr>
+                            <td>#{{ ep.episode_id }}</td>
+                            <td>
+                                <div><strong>{{ ep.title }}</strong></div>
+                                <div class="subtle">{{ ep.episode_type }}</div>
+                            </td>
+                            <td class="text-wrap">{{ ep.summary }}</td>
+                            <td>{{ "%.2f"|format(ep.importance or 0) }}</td>
+                            <td>{{ fact_status_badge(ep.status) }}</td>
+                            <td class="subtle">{{ ep.updated_at|kyiv_time(default='н/д') }}</td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="6" style="text-align:center; padding:24px; color:var(--text-muted);">
+                                Епізодична пам'ять персони ще порожня.
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <div style="display:grid; gap:18px; align-content:start;">
+            <section class="section-card dense-table">
+                <div class="section-header">
+                    <h2 class="section-title">🧪 Останні Extractor runs (persona)</h2>
+                    <span class="subtle">Backend / JSON / decisions</span>
+                </div>
+                <div class="table-container" style="margin: 0; background: transparent; border: 0; border-radius: 0; padding: 0;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Час</th>
+                                <th>Backend</th>
+                                <th>Mode</th>
+                                <th>Cand</th>
+                                <th>Saved</th>
+                                <th>JSON</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in recent_runs %}
+                            <tr>
+                                <td class="subtle">{{ row.created_at|kyiv_time(default='н/д') }}</td>
+                                <td><span class="badge">{{ row.backend_name or '' }}</span></td>
+                                <td>{% if row.dry_run %}<span class="badge yellow">dry-run</span>{% else %}<span class="badge green">apply</span>{% endif %}</td>
+                                <td>{{ row.candidate_count or 0 }}</td>
+                                <td>{{ row.saved_count or 0 }}</td>
+                                <td>
+                                    {% if row.json_valid %}<span class="badge green">ok</span>
+                                    {% elif row.llm_attempted %}<span class="badge yellow">bad</span>
+                                    {% else %}<span class="badge">n/a</span>{% endif %}
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="6" style="text-align:center; padding:20px; color:var(--text-muted);">
+                                    Запусків Extractor для персони ще не було.
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="section-card dense-table">
+                <div class="section-header">
+                    <h2 class="section-title">🧾 Останні кандидати Self-facts</h2>
+                    <span class="subtle">Рішення модерації та запис у пам'ять</span>
+                </div>
+                <div class="table-container" style="margin: 0; background: transparent; border: 0; border-radius: 0; padding: 0;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Факт</th>
+                                <th>Значення</th>
+                                <th>Directness</th>
+                                <th>Дія</th>
+                                <th>Saved</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in recent_candidates %}
+                            <tr>
+                                <td><span class="badge">{{ row.fact_key }}</span></td>
+                                <td class="text-wrap">{{ row.fact_value }}</td>
+                                <td><span class="badge">{{ row.directness or 'explicit' }}</span></td>
+                                <td>
+                                    {% set action = row.moderation_action or 'accept' %}
+                                    <span class="badge {% if action == 'accept' %}green{% else %}yellow{% endif %}">{{ action }}</span>
+                                </td>
+                                <td>{% if row.saved_to_memory %}<span class="badge green">так</span>{% else %}<span class="badge">ні</span>{% endif %}</td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted);">Кандидатів поки немає.</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    </div>
+</div>
+{% endblock %}

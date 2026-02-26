@@ -1,15 +1,15 @@
 {% extends "base.html" %}
 
-{% block title %}Memory Extractor Diagnostics - Live Role Bot{% endblock %}
+{% block title %}Діагностика Екстрактора Пам'яті - Live Role Bot{% endblock %}
 
 {% block content %}
 <div class="page-header">
-    <h1 class="page-title">Memory Extractor Diagnostics</h1>
-    <p class="page-description">Ollama health-check, extractor latency/JSON quality, dry-run outputs and moderation rejects.</p>
+    <h1 class="page-title">Діагностика Екстрактора Пам'яті</h1>
+    <p class="page-description">Перевірка Ollama, затримка/якість JSON екстрактора, dry-run кандидати та відхилення модерації.</p>
     <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
-        <a href="/memory" class="btn">Back To Memory</a>
-        <a href="/memory/provenance" class="btn">Provenance</a>
-        <a href="/memory/extractor?run_limit={{ run_limit }}&candidate_limit={{ candidate_limit }}" class="btn">Refresh</a>
+        <a href="/memory" class="btn">Назад до Пам'яті</a>
+        <a href="/memory/provenance" class="btn">Походження (Provenance)</a>
+        <a href="/memory/extractor?run_limit={{ run_limit }}&candidate_limit={{ candidate_limit }}" class="btn">Оновити</a>
     </div>
 </div>
 
@@ -17,13 +17,13 @@
     <table>
         <thead>
             <tr>
-                <th>Ollama Health</th>
-                <th>Configured Backend</th>
+                <th>Стан Ollama</th>
+                <th>Налаштований Backend</th>
                 <th>Base URL</th>
-                <th>Model</th>
+                <th>Модель</th>
                 <th>Ping</th>
-                <th>Latency</th>
-                <th>Info</th>
+                <th>Затримка</th>
+                <th>Інфо</th>
             </tr>
         </thead>
         <tbody>
@@ -32,7 +32,7 @@
                     {% if ollama_health.ping_ok %}
                     <span class="badge green">OK</span>
                     {% else %}
-                    <span class="badge yellow">Not Ready</span>
+                    <span class="badge yellow">Не готово</span>
                     {% endif %}
                 </td>
                 <td><span class="badge">{{ ollama_health.configured_backend or '' }}</span></td>
@@ -40,35 +40,35 @@
                 <td style="font-family: monospace;">{{ ollama_health.model or '' }}</td>
                 <td>
                     {% if ollama_health.model_available %}
-                    <span class="badge green">model found</span>
+                    <span class="badge green">модель знайдена</span>
                     {% else %}
-                    <span class="badge">{{ 'n/a' if ollama_health.configured_backend != 'ollama' else 'missing/unreachable' }}</span>
+                    <span class="badge">{{ 'н/д' if ollama_health.configured_backend != 'ollama' else 'немає/недоступна' }}</span>
                     {% endif %}
                 </td>
                 <td>{{ ollama_health.latency_ms if ollama_health.latency_ms is not none else '' }}{% if ollama_health.latency_ms is not none %} ms{% endif %}</td>
                 <td class="text-wrap" style="font-size:0.85rem; color: var(--text-muted);">
                     {% if ollama_health.error %}{{ ollama_health.error }}{% endif %}
-                    {% if ollama_health.parameter_size %}<div>params={{ ollama_health.parameter_size }}</div>{% endif %}
-                    {% if ollama_health.quantization_level %}<div>quant={{ ollama_health.quantization_level }}</div>{% endif %}
-                    {% if ollama_health.family %}<div>family={{ ollama_health.family }}</div>{% endif %}
+                    {% if ollama_health.parameter_size %}<div>параметри={{ ollama_health.parameter_size }}</div>{% endif %}
+                    {% if ollama_health.quantization_level %}<div>квантування={{ ollama_health.quantization_level }}</div>{% endif %}
+                    {% if ollama_health.family %}<div>сімейство={{ ollama_health.family }}</div>{% endif %}
                 </td>
             </tr>
         </tbody>
     </table>
 </div>
 
-<h2 style="margin-top: 0;">Extractor Summary</h2>
+<h2 style="margin-top: 0;">Зведення Екстрактора</h2>
 <div class="table-container">
     <table>
         <thead>
             <tr>
-                <th>Total Runs</th>
-                <th>Dry Runs</th>
-                <th>LLM Attempted</th>
-                <th>JSON Valid Rate</th>
-                <th>JSON Valid Rate (24h)</th>
-                <th>Avg Latency</th>
-                <th>Error Runs</th>
+                <th>Всього Запусків</th>
+                <th>Dry-Run Запусків</th>
+                <th>LLM Спроб</th>
+                <th>Валідний JSON (%)</th>
+                <th>Валідний JSON за 24г (%)</th>
+                <th>Сер. Затримка</th>
+                <th>Запуски з Помилками</th>
             </tr>
         </thead>
         <tbody>
@@ -85,17 +85,17 @@
     </table>
 </div>
 
-<h2 style="margin-top: 32px;">By Backend / Model</h2>
+<h2 style="margin-top: 32px;">За Backend / Моделлю</h2>
 <div class="table-container">
     <table>
         <thead>
             <tr>
                 <th>Backend</th>
-                <th>Model</th>
-                <th>Runs</th>
-                <th>Dry Runs</th>
-                <th>JSON Valid Rate</th>
-                <th>Avg Latency</th>
+                <th>Модель</th>
+                <th>Запуски</th>
+                <th>Dry-Run</th>
+                <th>Валідний JSON (%)</th>
+                <th>Сер. Затримка</th>
             </tr>
         </thead>
         <tbody>
@@ -109,25 +109,25 @@
                 <td>{{ row.avg_latency_ms or 0 }} ms</td>
             </tr>
             {% else %}
-            <tr><td colspan="6" style="text-align:center; padding:24px; color:var(--text-muted);">No extractor runs logged yet.</td></tr>
+            <tr><td colspan="6" style="text-align:center; padding:24px; color:var(--text-muted);">Запусків екстрактора ще не зафіксовано.</td></tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
 
-<h2 style="margin-top: 32px;">Recent Extractor Runs</h2>
+<h2 style="margin-top: 32px;">Останні Запуски Екстрактора</h2>
 <div class="table-container">
     <table>
         <thead>
             <tr>
-                <th>Time</th>
+                <th>Час</th>
                 <th>Backend</th>
-                <th>Owner</th>
-                <th>Source</th>
-                <th>Flags</th>
-                <th>Latency</th>
-                <th>Candidates</th>
-                <th>Error</th>
+                <th>Власник</th>
+                <th>Джерело</th>
+                <th>Прапорці</th>
+                <th>Затримка</th>
+                <th>Кандидати</th>
+                <th>Помилка</th>
             </tr>
         </thead>
         <tbody>
@@ -162,23 +162,23 @@
                 <td class="text-wrap" style="max-width:280px; font-size:0.82rem; color:var(--text-muted);">{{ row.error_text or '' }}</td>
             </tr>
             {% else %}
-            <tr><td colspan="8" style="text-align:center; padding:24px; color:var(--text-muted);">No extractor runs logged yet.</td></tr>
+            <tr><td colspan="8" style="text-align:center; padding:24px; color:var(--text-muted);">Запусків екстрактора ще не зафіксовано.</td></tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
 
-<h2 style="margin-top: 32px;">Dry-Run Candidates</h2>
+<h2 style="margin-top: 32px;">Dry-Run Кандидати</h2>
 <div class="table-container">
     <table>
         <thead>
             <tr>
-                <th>Time</th>
-                <th>Owner</th>
-                <th>Fact</th>
-                <th>Value</th>
-                <th>Meta</th>
-                <th>Decision</th>
+                <th>Час</th>
+                <th>Власник</th>
+                <th>Факт</th>
+                <th>Значення</th>
+                <th>Мета</th>
+                <th>Рішення</th>
             </tr>
         </thead>
         <tbody>
@@ -206,23 +206,23 @@
                 </td>
             </tr>
             {% else %}
-            <tr><td colspan="6" style="text-align:center; padding:24px; color:var(--text-muted);">No dry-run candidates yet.</td></tr>
+            <tr><td colspan="6" style="text-align:center; padding:24px; color:var(--text-muted);">Dry-run кандидатів поки немає.</td></tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
 
-<h2 style="margin-top: 32px;">Recent Rejected Candidates</h2>
+<h2 style="margin-top: 32px;">Останні Відхилені Кандидати</h2>
 <div class="table-container">
     <table>
         <thead>
             <tr>
-                <th>Time</th>
+                <th>Час</th>
                 <th>Backend</th>
-                <th>Fact</th>
-                <th>Meta</th>
-                <th>Reason</th>
-                <th>Value</th>
+                <th>Факт</th>
+                <th>Мета</th>
+                <th>Причина</th>
+                <th>Значення</th>
             </tr>
         </thead>
         <tbody>
@@ -244,10 +244,9 @@
                 <td class="text-wrap">{{ row.fact_value }}</td>
             </tr>
             {% else %}
-            <tr><td colspan="6" style="text-align:center; padding:24px; color:var(--text-muted);">No rejected candidates logged.</td></tr>
+            <tr><td colspan="6" style="text-align:center; padding:24px; color:var(--text-muted);">Відхилених кандидатів поки немає.</td></tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
 {% endblock %}
-

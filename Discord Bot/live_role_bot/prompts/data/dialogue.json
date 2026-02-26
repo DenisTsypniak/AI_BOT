@@ -21,6 +21,5 @@
   "known_participant_fact_line_template": "- {label}: {fact_text}",
   "user_dialogue_summary_line_template": "User dialogue memory summary: {summary_text}",
   "relevant_facts_section_header": "User memory facts relevant for this turn:",
-  "relevant_fact_line_template": "- [{fact_type} | c={confidence:.2f}] {fact_value}"
+  "relevant_fact_line_template": "- [{fact_key} | {fact_type} | c={confidence:.2f}] {fact_value}"
 }
-

@@ -1834,6 +1834,8 @@ class MessageMixin:
             return
         if await self._try_handle_system_command(message):
             return
+        if not bool(getattr(self.settings, "text_chat_dialogue_enabled", True)):
+            return
         if not self._should_auto_reply(message):
             return
 

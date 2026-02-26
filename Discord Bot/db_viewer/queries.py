@@ -1,11 +1,34 @@
 from __future__ import annotations
 
 import asyncpg
+import json
 import logging
 import re
 import time
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_json_list(value: object) -> list[dict]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return []
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+    return []
+
+
+def _normalize_provenance_row(row: dict) -> dict:
+    row["provenance_guild_breakdown"] = _coerce_json_list(row.get("provenance_guild_breakdown"))
+    row["provenance_directness_breakdown"] = _coerce_json_list(row.get("provenance_directness_breakdown"))
+    return row
 
 
 def _normalize_limit_offset(limit: int, offset: int, *, default_limit: int, max_limit: int) -> tuple[int, int]:
@@ -22,50 +45,6 @@ def _normalize_limit_offset(limit: int, offset: int, *, default_limit: int, max_
     safe_limit = min(safe_limit, max_limit)
     safe_offset = max(0, safe_offset)
     return safe_limit, safe_offset
-
-
-async def get_dashboard_stats(pool: asyncpg.Pool) -> dict[str, int]:
-    async with pool.acquire() as conn:
-        stats = {
-            "total_users": 0,
-            "total_messages": 0,
-            "total_sessions": 0,
-            "total_facts": 0,
-            "total_episodes": 0,
-            "total_reflections": 0,
-        }
-        
-        try:
-            stats["total_users"] = await conn.fetchval("SELECT COUNT(*) FROM users")
-            stats["total_messages"] = await conn.fetchval("SELECT COUNT(*) FROM messages")
-            stats["total_sessions"] = await conn.fetchval("SELECT COUNT(*) FROM sessions")
-        except asyncpg.exceptions.UndefinedTableError:
-            logger.debug("Dashboard stats: core tables missing")
-            pass
-            
-        try:
-            stats["total_facts"] = await conn.fetchval("SELECT COUNT(*) FROM user_facts")
-        except asyncpg.exceptions.UndefinedTableError:
-            logger.debug("Dashboard stats: user_facts table missing")
-            pass
-            
-        try:
-            stats["total_episodes"] = await conn.fetchval(
-                "SELECT COUNT(*) FROM persona_episodes"
-            )
-        except asyncpg.exceptions.UndefinedTableError:
-            logger.debug("Dashboard stats: persona_episodes table missing")
-            pass
-            
-        try:
-            stats["total_reflections"] = await conn.fetchval(
-                "SELECT COUNT(*) FROM persona_reflections"
-            )
-        except asyncpg.exceptions.UndefinedTableError:
-            logger.debug("Dashboard stats: persona_reflections table missing")
-            pass
-            
-        return stats
 
 
 async def get_users(pool: asyncpg.Pool, limit: int = 50, offset: int = 0) -> list[dict]:
@@ -279,7 +258,7 @@ async def get_memory_provenance_snapshot(
                 offset,
             )
             for row in rows:
-                item = dict(row)
+                item = _normalize_provenance_row(dict(row))
                 is_persona = str(item.get("user_id") or "").startswith("persona::")
                 item["is_persona_memory"] = is_persona
                 if is_persona:
@@ -341,6 +320,193 @@ async def get_memory_provenance_snapshot(
             logger.debug("get_memory_provenance_snapshot: global_biography_summaries table missing")
         except Exception:
             logger.exception("get_memory_provenance_snapshot failed while loading biographies")
+
+    return snapshot
+
+
+async def get_persona_memory_snapshot(
+    pool: asyncpg.Pool,
+    *,
+    fact_limit: int = 120,
+    fact_offset: int = 0,
+    run_limit: int = 40,
+    candidate_limit: int = 80,
+) -> dict[str, object]:
+    fact_limit, fact_offset = _normalize_limit_offset(fact_limit, fact_offset, default_limit=120, max_limit=500)
+    run_limit, _ = _normalize_limit_offset(run_limit, 0, default_limit=40, max_limit=200)
+    candidate_limit, _ = _normalize_limit_offset(candidate_limit, 0, default_limit=80, max_limit=300)
+
+    snapshot: dict[str, object] = {
+        "summary": {},
+        "biographies": [],
+        "facts": [],
+        "recent_runs": [],
+        "recent_candidates": [],
+        "rejected_candidates": [],
+    }
+
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*)::int AS total_facts,
+                    COUNT(*) FILTER (WHERE status = 'confirmed')::int AS confirmed_facts,
+                    COUNT(*) FILTER (WHERE status = 'candidate')::int AS candidate_facts,
+                    COUNT(*) FILTER (WHERE pinned = TRUE)::int AS pinned_facts,
+                    COUNT(DISTINCT user_id)::int AS persona_subjects,
+                    COALESCE(ROUND(AVG(confidence)::numeric, 3), 0)::float8 AS avg_confidence,
+                    MAX(updated_at) AS last_fact_update
+                FROM global_user_facts
+                WHERE user_id LIKE 'persona::%'
+                """
+            )
+            snapshot["summary"] = dict(row) if row is not None else {}
+        except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_persona_memory_snapshot: global_user_facts table missing")
+        except Exception:
+            logger.exception("get_persona_memory_snapshot failed while loading summary")
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    subject_kind,
+                    subject_id,
+                    summary_text,
+                    source_fact_count,
+                    source_summary_count,
+                    source_updated_at,
+                    last_source_guild_id,
+                    updated_at
+                FROM global_biography_summaries
+                WHERE subject_kind = 'persona'
+                ORDER BY updated_at DESC
+                LIMIT $1
+                """,
+                max(10, min(fact_limit, 100)),
+            )
+            snapshot["biographies"] = [dict(row) for row in rows]
+        except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_persona_memory_snapshot: global_biography_summaries table missing")
+        except Exception:
+            logger.exception("get_persona_memory_snapshot failed while loading biographies")
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    guf.global_fact_id,
+                    guf.user_id,
+                    regexp_replace(guf.user_id, '^persona::', '') AS persona_id,
+                    guf.fact_key,
+                    guf.fact_value,
+                    guf.fact_type,
+                    guf.about_target,
+                    guf.directness,
+                    guf.evidence_quote,
+                    guf.confidence,
+                    guf.importance,
+                    guf.status,
+                    guf.pinned,
+                    guf.evidence_count,
+                    guf.last_source_guild_id,
+                    guf.updated_at,
+                    COALESCE(ev.total_evidence, 0) AS provenance_evidence_count,
+                    COALESCE(ev.guild_breakdown, '[]'::jsonb) AS provenance_guild_breakdown,
+                    COALESCE(ev.directness_breakdown, '[]'::jsonb) AS provenance_directness_breakdown
+                FROM global_user_facts guf
+                LEFT JOIN LATERAL (
+                    SELECT
+                        COUNT(*)::int AS total_evidence,
+                        COALESCE(
+                            jsonb_agg(
+                                jsonb_build_object('guild_id', e.guild_id, 'count', e.cnt)
+                                ORDER BY e.cnt DESC, e.guild_id
+                            ),
+                            '[]'::jsonb
+                        ) AS guild_breakdown,
+                        COALESCE(
+                            (
+                                SELECT jsonb_agg(
+                                    jsonb_build_object('directness', d.directness, 'count', d.cnt)
+                                    ORDER BY d.cnt DESC, d.directness
+                                )
+                                FROM (
+                                    SELECT COALESCE(directness, 'explicit') AS directness, COUNT(*)::int AS cnt
+                                    FROM global_fact_evidence
+                                    WHERE global_fact_id = guf.global_fact_id
+                                    GROUP BY COALESCE(directness, 'explicit')
+                                ) d
+                            ),
+                            '[]'::jsonb
+                        ) AS directness_breakdown
+                    FROM (
+                        SELECT COALESCE(source_guild_id, '') AS guild_id, COUNT(*)::int AS cnt
+                        FROM global_fact_evidence
+                        WHERE global_fact_id = guf.global_fact_id
+                        GROUP BY COALESCE(source_guild_id, '')
+                    ) e
+                ) ev ON TRUE
+                WHERE guf.user_id LIKE 'persona::%'
+                ORDER BY guf.updated_at DESC, guf.global_fact_id DESC
+                LIMIT $1 OFFSET $2
+                """,
+                fact_limit,
+                fact_offset,
+            )
+            snapshot["facts"] = [_normalize_provenance_row(dict(row)) for row in rows]
+        except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_persona_memory_snapshot: persona/global fact tables missing")
+        except Exception:
+            logger.exception("get_persona_memory_snapshot failed while loading facts")
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    run_id, guild_id, channel_id, speaker_user_id, fact_owner_kind, fact_owner_id, speaker_role,
+                    modality, source, backend_name, model_name, dry_run, llm_attempted, llm_ok, json_valid, fallback_used,
+                    latency_ms, candidate_count, accepted_count, saved_count, filtered_count, error_text, created_at
+                FROM memory_extractor_runs
+                WHERE fact_owner_kind = 'persona'
+                ORDER BY created_at DESC, run_id DESC
+                LIMIT $1
+                """,
+                run_limit,
+            )
+            snapshot["recent_runs"] = [dict(row) for row in rows]
+        except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_persona_memory_snapshot: memory_extractor_runs table missing")
+        except Exception:
+            logger.exception("get_persona_memory_snapshot failed while loading recent runs")
+
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.candidate_row_id, c.run_id, c.fact_key, c.fact_value, c.fact_type,
+                    c.about_target, c.directness, c.evidence_quote, c.confidence, c.importance,
+                    c.moderation_action, c.moderation_reason, c.selected_for_apply, c.saved_to_memory, c.created_at,
+                    r.guild_id, r.channel_id, r.speaker_user_id, r.fact_owner_kind, r.fact_owner_id,
+                    r.backend_name, r.model_name, r.dry_run
+                FROM memory_extractor_candidates c
+                JOIN memory_extractor_runs r ON r.run_id = c.run_id
+                WHERE r.fact_owner_kind = 'persona'
+                ORDER BY c.created_at DESC, c.candidate_row_id DESC
+                LIMIT $1
+                """,
+                candidate_limit,
+            )
+            all_candidates = [dict(row) for row in rows]
+            snapshot["recent_candidates"] = all_candidates
+            snapshot["rejected_candidates"] = [
+                row for row in all_candidates if str(row.get("moderation_action") or "accept") != "accept"
+            ]
+        except asyncpg.exceptions.UndefinedTableError:
+            logger.debug("get_persona_memory_snapshot: memory_extractor_candidates table missing")
+        except Exception:
+            logger.exception("get_persona_memory_snapshot failed while loading candidates")
 
     return snapshot
 
@@ -556,29 +722,6 @@ async def get_row_by_pk(pool: asyncpg.Pool, table: str, pk_col: str, pk_val: int
         except Exception:
             logger.exception("get_row_by_pk failed for table=%s pk_col=%s pk_val=%s", table, pk_col, pk_val)
             return None
-
-async def get_analytics_data(pool: asyncpg.Pool) -> dict:
-    data = {"daily_messages": [], "role_distribution": []}
-    async with pool.acquire() as conn:
-        try:
-            msg_rows = await conn.fetch("""
-                SELECT DATE(created_at) as date, COUNT(*) as count
-                FROM messages
-                GROUP BY DATE(created_at)
-                ORDER BY date DESC
-                LIMIT 30
-            """)
-            data["daily_messages"] = [{"date": r["date"].isoformat() if r["date"] else "", "count": r["count"]} for r in msg_rows]
-            
-            role_rows = await conn.fetch("""
-                SELECT role, COUNT(*) as count
-                FROM messages
-                GROUP BY role
-            """)
-            data["role_distribution"] = [dict(r) for r in role_rows]
-        except Exception:
-            logger.exception("get_analytics_data failed")
-    return data
 
 async def get_tables(pool: asyncpg.Pool) -> list[dict]:
     async with pool.acquire() as conn:

@@ -36,7 +36,7 @@ _DEFAULTS: dict[str, Any] = {
     "persona_biography_summary_line_template": "Your persistent autobiography summary: {summary_text}",
     "relevant_facts_section_header": "User memory facts relevant for this turn:",
     "persona_relevant_facts_section_header": "Your autobiographical continuity facts:",
-    "relevant_fact_line_template": "- [{fact_type} | c={confidence:.2f}] {fact_value}",
+    "relevant_fact_line_template": "- [{fact_key} | {fact_type} | c={confidence:.2f}] {fact_value}",
 }
 
 
@@ -116,14 +116,23 @@ def build_relevant_facts_section(facts: list[dict[str, Any]]) -> str:
     cfg = _cfg()
     header = str(cfg.get("relevant_facts_section_header", _DEFAULTS["relevant_facts_section_header"]))
     line_template = str(cfg.get("relevant_fact_line_template", _DEFAULTS["relevant_fact_line_template"]))
-    fact_lines = [
-        line_template.format(
-            fact_type=fact["fact_type"],
-            confidence=float(fact["confidence"]),
-            fact_value=fact["fact_value"],
+    fact_lines = []
+    for fact in facts:
+        fact_type = str(fact.get("fact_type") or "fact").strip() or "fact"
+        fact_key = str(fact.get("fact_key") or "").strip() or fact_type
+        fact_value = str(fact.get("fact_value") or "").strip()
+        try:
+            confidence = float(fact.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        fact_lines.append(
+            line_template.format(
+                fact_key=fact_key,
+                fact_type=fact_type,
+                confidence=confidence,
+                fact_value=fact_value,
+            )
         )
-        for fact in facts
-    ]
     return header + "\n" + "\n".join(fact_lines)
 
 
@@ -131,12 +140,21 @@ def build_persona_relevant_facts_section(facts: list[dict[str, Any]]) -> str:
     cfg = _cfg()
     header = str(cfg.get("persona_relevant_facts_section_header", _DEFAULTS["persona_relevant_facts_section_header"]))
     line_template = str(cfg.get("relevant_fact_line_template", _DEFAULTS["relevant_fact_line_template"]))
-    fact_lines = [
-        line_template.format(
-            fact_type=fact["fact_type"],
-            confidence=float(fact["confidence"]),
-            fact_value=fact["fact_value"],
+    fact_lines = []
+    for fact in facts:
+        fact_type = str(fact.get("fact_type") or "fact").strip() or "fact"
+        fact_key = str(fact.get("fact_key") or "").strip() or fact_type
+        fact_value = str(fact.get("fact_value") or "").strip()
+        try:
+            confidence = float(fact.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        fact_lines.append(
+            line_template.format(
+                fact_key=fact_key,
+                fact_type=fact_type,
+                confidence=confidence,
+                fact_value=fact_value,
+            )
         )
-        for fact in facts
-    ]
     return header + "\n" + "\n".join(fact_lines)

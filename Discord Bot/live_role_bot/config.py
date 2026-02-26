@@ -105,6 +105,14 @@ class Settings:
     mention_only: bool
     auto_reply_channel_ids: Set[int]
     preferred_response_language: str
+    text_chat_dialogue_enabled: bool
+
+    text_llm_backend: str
+    text_ollama_base_url: str
+    text_ollama_model: str
+    text_ollama_timeout_seconds: int
+    text_ollama_temperature: float
+    text_ollama_max_output_tokens: int
 
     gemini_api_key: str
     gemini_base_url: str
@@ -218,6 +226,31 @@ class Settings:
             mention_only=_env_bool("BOT_MENTION_ONLY", False),
             auto_reply_channel_ids=_env_id_set("AUTO_REPLY_CHANNEL_IDS"),
             preferred_response_language=_env_str("PREFERRED_RESPONSE_LANGUAGE", "Ukrainian"),
+            text_chat_dialogue_enabled=_env_bool("TEXT_CHAT_DIALOGUE_ENABLED", True),
+            text_llm_backend=_env_str("TEXT_LLM_BACKEND", "gemini").lower(),
+            text_ollama_base_url=_env_str(
+                "TEXT_OLLAMA_BASE_URL",
+                "http://127.0.0.1:11434",
+                aliases=("MEMORY_OLLAMA_BASE_URL",),
+            ),
+            text_ollama_model=_env_str(
+                "TEXT_OLLAMA_MODEL",
+                "",
+                aliases=("MEMORY_OLLAMA_MODEL",),
+            ),
+            text_ollama_timeout_seconds=_env_int(
+                "TEXT_OLLAMA_TIMEOUT_SECONDS",
+                90,
+                aliases=("MEMORY_OLLAMA_TIMEOUT_SECONDS",),
+            ),
+            text_ollama_temperature=_env_float(
+                "TEXT_OLLAMA_TEMPERATURE",
+                0.35,
+            ),
+            text_ollama_max_output_tokens=_env_int(
+                "TEXT_OLLAMA_MAX_OUTPUT_TOKENS",
+                0,
+            ),
             gemini_api_key=_env_str("GEMINI_API_KEY", ""),
             gemini_base_url=_env_str("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),
             gemini_model=_env_str("GEMINI_MODEL", "gemini-2.5-flash"),
@@ -347,6 +380,19 @@ class Settings:
             raise ValueError("DISCORD_TOKEN is still placeholder")
         if not self.command_prefix.strip():
             raise ValueError("DISCORD_COMMAND_PREFIX cannot be empty")
+
+        if self.text_llm_backend not in {"gemini", "ollama"}:
+            raise ValueError("TEXT_LLM_BACKEND must be 'gemini' or 'ollama'")
+        if self.text_ollama_timeout_seconds < 5:
+            raise ValueError("TEXT_OLLAMA_TIMEOUT_SECONDS must be >= 5")
+        if self.text_ollama_temperature < 0.0 or self.text_ollama_temperature > 1.0:
+            raise ValueError("TEXT_OLLAMA_TEMPERATURE must be in [0, 1]")
+        if self.text_ollama_max_output_tokens < 0:
+            raise ValueError("TEXT_OLLAMA_MAX_OUTPUT_TOKENS must be >= 0")
+        if self.text_ollama_max_output_tokens and self.text_ollama_max_output_tokens < 64:
+            raise ValueError("TEXT_OLLAMA_MAX_OUTPUT_TOKENS must be 0 or >= 64")
+        if self.text_llm_backend == "ollama" and not self.text_ollama_model.strip():
+            raise ValueError("TEXT_OLLAMA_MODEL cannot be empty when TEXT_LLM_BACKEND=ollama")
 
         if not self.gemini_api_key:
             raise ValueError("GEMINI_API_KEY is required")

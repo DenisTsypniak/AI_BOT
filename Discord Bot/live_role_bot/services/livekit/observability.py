@@ -45,7 +45,7 @@ class HealthHeartbeat:
         while True:
             await asyncio.sleep(self.interval_seconds)
             idle = time.monotonic() - self.state.last_activity_at
-            logger.info(
+            logger.debug(
                 "[livekit.health] worker=%s agent=%s room=%s rooms_started=%s rooms_closed=%s idle_sec=%.1f",
                 self.state.worker_name,
                 self.state.agent_name,
@@ -54,4 +54,3 @@ class HealthHeartbeat:
                 self.state.rooms_closed,
                 idle,
             )
-

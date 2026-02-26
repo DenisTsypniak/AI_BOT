@@ -30,6 +30,7 @@ from .memory.extractor import MemoryExtractor
 from .memory.factory import build_memory_store
 from .services.gemini_client import GeminiClient
 from .services.local_stt import LocalSTT
+from .services.ollama_chat_client import OllamaChatClient
 from .services.ollama_extractor_backend import OllamaExtractorBackend
 
 logger = logging.getLogger("live_role_bot")
@@ -50,6 +51,7 @@ def configure_logging() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        force=True,
     )
     root_logger = logging.getLogger()
     has_noise_filter = any(isinstance(f, _DropNoisyRootMessages) for f in getattr(root_logger, "filters", []))
@@ -62,6 +64,8 @@ def configure_logging() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+    logging.getLogger("livekit").setLevel(logging.WARNING)
+    logging.getLogger("livekit.agents").setLevel(logging.WARNING)
 
 
 def _is_tty(stream: object) -> bool:
@@ -151,14 +155,23 @@ def _release_instance_lock(lock_path: Path) -> None:
 
 def build_bot(settings: Settings) -> LiveRoleDiscordBot:
     memory = build_memory_store(settings.sqlite_path)
-    llm = GeminiClient(
-        api_key=settings.gemini_api_key,
-        model=settings.gemini_model,
-        timeout_seconds=settings.gemini_timeout_seconds,
-        temperature=settings.gemini_temperature,
-        max_output_tokens=settings.gemini_max_output_tokens,
-        base_url=settings.gemini_base_url,
-    )
+    if settings.text_llm_backend == "ollama":
+        llm = OllamaChatClient(
+            base_url=settings.text_ollama_base_url,
+            model=settings.text_ollama_model,
+            timeout_seconds=settings.text_ollama_timeout_seconds,
+            temperature=settings.text_ollama_temperature,
+            max_output_tokens=settings.text_ollama_max_output_tokens,
+        )
+    else:
+        llm = GeminiClient(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_model,
+            timeout_seconds=settings.gemini_timeout_seconds,
+            temperature=settings.gemini_temperature,
+            max_output_tokens=settings.gemini_max_output_tokens,
+            base_url=settings.gemini_base_url,
+        )
     # Keep local STT available for bridge-memory transcription even when Gemini Native Audio is enabled.
     # Native Audio disables only the local voice reply fallback path, not the per-user voice memory ingest path.
     bridge_enabled_hint = str(os.getenv("LIVEKIT_BRIDGE_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
@@ -181,13 +194,24 @@ def build_bot(settings: Settings) -> LiveRoleDiscordBot:
     extractor = MemoryExtractor(
         enabled=settings.memory_enabled,
         llm=(
-            llm
-            if settings.memory_extractor_backend == "gemini"
-            else OllamaExtractorBackend(
-                base_url=settings.memory_ollama_base_url,
-                model=settings.memory_ollama_model,
-                timeout_seconds=settings.memory_ollama_timeout_seconds,
-                temperature=settings.memory_ollama_temperature,
+            (
+                llm
+                if settings.memory_extractor_backend == "gemini"
+                else OllamaExtractorBackend(
+                    base_url=settings.memory_ollama_base_url,
+                    model=settings.memory_ollama_model,
+                    timeout_seconds=settings.memory_ollama_timeout_seconds,
+                    temperature=settings.memory_ollama_temperature,
+                )
+            )
+            if not (settings.memory_extractor_backend == "gemini" and settings.text_llm_backend != "gemini")
+            else GeminiClient(
+                api_key=settings.gemini_api_key,
+                model=settings.gemini_model,
+                timeout_seconds=settings.gemini_timeout_seconds,
+                temperature=settings.gemini_temperature,
+                max_output_tokens=settings.gemini_max_output_tokens,
+                base_url=settings.gemini_base_url,
             )
         ),
         candidate_limit=settings.memory_candidate_fact_limit,
